@@ -1,0 +1,23 @@
+name: secmynet_mobile
+description: SecMyNet mobile admin (template)
+version: 0.1.0+1
+publish_to: 'none'
+
+environment:
+  sdk: '>=2.18.0 <3.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.2
+  firebase_core: ^2.24.0
+  firebase_messaging: ^14.6.6
+  http: ^1.1.0
+  shared_preferences: ^2.1.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

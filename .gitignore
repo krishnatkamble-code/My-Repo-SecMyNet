@@ -1,0 +1,31 @@
+# Node
+node_modules/
+
+# Local data
+/data/
+*.sqlite
+
+# macOS artifacts
+.DS_Store
+
+# Build outputs
+build/
+
+# Environment and secrets
+.env
+.env.*
+
+# IDEs
+.vscode/
+.idea/
+
+# Android local properties
+**/android/local.properties
+
+# Flutter build
+**/build/
+**/.gradle/
+
+# Logs
+logs/
+*.log

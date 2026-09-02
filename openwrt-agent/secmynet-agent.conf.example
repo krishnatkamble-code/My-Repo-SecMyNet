@@ -1,0 +1,4 @@
+# Must use HTTPS in production. Prefer an outbound WireGuard tunnel from router to server.
+SECMYNET_URL="https://your-secmynet-server.example"
+SECMYNET_ROUTER_ID="openwrt-router-..."
+SECMYNET_AGENT_TOKEN="paste-token-shown-once-by-the-portal"

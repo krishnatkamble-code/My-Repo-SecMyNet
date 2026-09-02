@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Devices | SecMyNet</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="hero page-hero">
+      <div>
+        <a class="back-link" href="index.html">← Back to dashboard</a>
+        <h1>Device Details</h1>
+        <p>View device status, WiFi information, location, and access permissions.</p>
+      </div>
+    </header>
+
+    <main class="container detail-container">
+      <section class="card">
+        <div class="dashboard-header">
+          <h2>All Devices</h2>
+          <a class="button-link" href="index.html">Add a device</a>
+        </div>
+        <p id="pageMessage" class="page-message">Loading devices…</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Device</th>
+                <th>WiFi</th>
+                <th>Location</th>
+                <th>Status</th>
+                <th>Allowed Users</th>
+                <th>Device ID</th>
+              </tr>
+            </thead>
+            <tbody id="detailsTable"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="details.js"></script>
+  </body>
+</html>

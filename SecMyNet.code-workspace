@@ -1,0 +1,25 @@
+{
+  "folders": [
+    {
+      "path": "."
+    },
+    {
+      "path": "android-app"
+    },
+    {
+      "path": "azure-app-service"
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/node_modules": true,
+      "**/.git": true,
+      "**/.gradle": true
+    },
+    "search.exclude": {
+      "**/node_modules": true,
+      "**/.gradle": true
+    },
+    "terminal.integrated.cwd": "${workspaceFolder:0}"
+  }
+}

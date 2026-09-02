@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Locations | SecMyNet</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="hero page-hero">
+      <div>
+        <a class="back-link" href="index.html">← Back to dashboard</a>
+        <h1>Location Details</h1>
+        <p>View every managed location and its connected device count.</p>
+      </div>
+    </header>
+
+    <main class="container detail-container">
+      <section class="card">
+        <div class="dashboard-header">
+          <h2>All Locations</h2>
+          <a class="button-link" href="index.html">Add a location</a>
+        </div>
+        <p id="pageMessage" class="page-message">Loading locations…</p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Location</th>
+                <th>City</th>
+                <th>Location ID</th>
+                <th>Devices</th>
+                <th>Created</th>
+              </tr>
+            </thead>
+            <tbody id="detailsTable"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="details.js"></script>
+  </body>
+</html>
