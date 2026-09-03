@@ -14,22 +14,32 @@ function Write-ErrorAndExit($message) {
 }
 
 $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
-if (-not $dockerCmd) {
-    Write-ErrorAndExit "Docker is not installed or not available on PATH. Please install Docker Desktop and try again."
+$useSqlite = $false
+if ($dockerCmd) {
+    Write-Host "Starting PostgreSQL container..."
+    $composeResult = docker compose up -d postgres 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "PostgreSQL container started."
+    } else {
+        Write-Host $composeResult
+        Write-Host "PostgreSQL could not be started; using the local SQLite database." -ForegroundColor Yellow
+        $useSqlite = $true
+    }
+} else {
+    Write-Host "Docker is not available; using the local SQLite database." -ForegroundColor Yellow
+    $useSqlite = $true
 }
-
-Write-Host "Starting PostgreSQL container..."
-$composeResult = docker compose up -d postgres 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host $composeResult
-    Write-ErrorAndExit "Failed to start PostgreSQL container."
-}
-
-Write-Host "PostgreSQL container started."
 
 if (-not (Test-Path .env)) {
     Write-Host "Creating .env from .env.example..."
     Copy-Item -Path .env.example -Destination .env -Force
+}
+
+if ($useSqlite) {
+    $databaseLine = Get-Content .env | Where-Object { $_ -match '^DATABASE_URL=' } | Select-Object -First 1
+    if ($databaseLine -match 'localhost|127\.0\.0\.1') {
+        $env:DATABASE_URL = ''
+    }
 }
 
 Write-Host "Ensuring dependencies are installed..."

@@ -80,11 +80,17 @@ async function initSqliteDb() {
     location_id TEXT NOT NULL,
     name TEXT NOT NULL,
     wifi_name TEXT NOT NULL,
+    ip_address TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT 'allowed',
     allowed_user_ids TEXT NOT NULL DEFAULT '[]',
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL
   );`);
+  try {
+    sqliteDb.run("ALTER TABLE devices ADD COLUMN ip_address TEXT NOT NULL DEFAULT ''");
+  } catch (error) {
+    // Existing databases already have this column after the first migration.
+  }
 
   sqliteDb.run(`CREATE TABLE IF NOT EXISTS connections (
     id TEXT PRIMARY KEY,
@@ -254,12 +260,14 @@ async function initDb() {
         location_id TEXT NOT NULL,
         name TEXT NOT NULL,
         wifi_name TEXT NOT NULL,
+        ip_address TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL DEFAULT 'allowed',
         allowed_user_ids TEXT NOT NULL DEFAULT '[]',
         created_by TEXT NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
+    await postgresPool.query("ALTER TABLE devices ADD COLUMN IF NOT EXISTS ip_address TEXT NOT NULL DEFAULT ''");
 
     await postgresPool.query(`
       CREATE TABLE IF NOT EXISTS connections (

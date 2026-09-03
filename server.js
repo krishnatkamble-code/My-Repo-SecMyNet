@@ -724,17 +724,22 @@ app.patch('/api/locations/:locationId', authRequired, adminRequired, async (req,
 
 app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
-  const { locationId, name, wifiName, status } = req.body;
+  const { locationId, name, wifiName, ipAddress, status } = req.body;
 
-  if (!locationId || !name || !wifiName) {
-    return res.status(400).json({ message: 'locationId, name, and wifiName are required.' });
+  if (!locationId || !name || !wifiName || !ipAddress) {
+    return res.status(400).json({ message: 'locationId, name, wifiName, and ipAddress are required.' });
+  }
+
+  const ipParts = String(ipAddress).split('.');
+  if (ipParts.length !== 4 || ipParts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 256)) {
+    return res.status(400).json({ message: 'Enter a valid IPv4 address, for example 192.168.255.254.' });
   }
 
   const deviceId = makeId('device');
   await run(
-    `INSERT INTO devices (id, location_id, name, wifi_name, status, allowed_user_ids, created_by, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
-    [deviceId, locationId, name, wifiName, status || 'allowed', '[]', req.user.id]
+    `INSERT INTO devices (id, location_id, name, wifi_name, ip_address, status, allowed_user_ids, created_by, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+    [deviceId, locationId, name, wifiName, ipAddress, status || 'allowed', '[]', req.user.id]
   );
 
   const device = await get('SELECT * FROM devices WHERE id = $1', [deviceId]);
