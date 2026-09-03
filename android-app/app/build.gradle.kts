@@ -31,16 +31,19 @@ android {
     productFlavors {
         create("local") {
             dimension = "server"
-            buildConfigField("String", "API_BASE_URL", "\"${project.findProperty(\"API_BASE_URL_LOCAL\") ?: \"http://10.0.2.2:3000\"}\"")
+            val apiUrl = project.findProperty("API_BASE_URL_LOCAL")?.toString() ?: "http://0.0.0.0:3000"
+            buildConfigField("String", "API_BASE_URL", "\"$apiUrl\"")
         }
         create("remote") {
             dimension = "server"
-            buildConfigField("String", "API_BASE_URL", "\"${project.findProperty(\"API_BASE_URL_REMOTE\") ?: \"http://192.168.1.100:3000\"}\"")
+            val apiUrl = project.findProperty("API_BASE_URL_REMOTE")?.toString() ?: "http://192.168.1.100:3000"
+            buildConfigField("String", "API_BASE_URL", "\"$apiUrl\"")
         }
     }
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     composeOptions {
