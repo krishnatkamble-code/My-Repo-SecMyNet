@@ -66,6 +66,11 @@ async function initSqliteDb() {
   } catch (error) {
     // Existing databases already have this column after the first migration.
   }
+  try {
+    sqliteDb.run("ALTER TABLE users ADD COLUMN mobile_number TEXT");
+  } catch (error) {
+    // Existing databases already have this column after the migration.
+  }
 
   sqliteDb.run(`CREATE TABLE IF NOT EXISTS locations (
     id TEXT PRIMARY KEY,
@@ -90,6 +95,11 @@ async function initSqliteDb() {
     sqliteDb.run("ALTER TABLE devices ADD COLUMN ip_address TEXT NOT NULL DEFAULT ''");
   } catch (error) {
     // Existing databases already have this column after the first migration.
+  }
+  try {
+    sqliteDb.run("ALTER TABLE devices ADD COLUMN router_id TEXT");
+  } catch (error) {
+    // Existing databases already have this column after the migration.
   }
 
   sqliteDb.run(`CREATE TABLE IF NOT EXISTS connections (
@@ -156,6 +166,15 @@ async function initSqliteDb() {
     user_id TEXT NOT NULL,
     phone TEXT,
     sms_opt_in INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+  );`);
+
+  sqliteDb.run(`CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
     created_at TEXT NOT NULL
   );`);
 
@@ -243,6 +262,7 @@ async function initDb() {
       );
     `);
     await postgresPool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS access_status TEXT NOT NULL DEFAULT 'enabled'");
+    await postgresPool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile_number TEXT");
 
     await postgresPool.query(`
       CREATE TABLE IF NOT EXISTS locations (
@@ -268,6 +288,7 @@ async function initDb() {
       );
     `);
     await postgresPool.query("ALTER TABLE devices ADD COLUMN IF NOT EXISTS ip_address TEXT NOT NULL DEFAULT ''");
+    await postgresPool.query("ALTER TABLE devices ADD COLUMN IF NOT EXISTS router_id TEXT");
 
     await postgresPool.query(`
       CREATE TABLE IF NOT EXISTS connections (
@@ -357,6 +378,16 @@ async function initDb() {
         user_id TEXT NOT NULL,
         phone TEXT,
         sms_opt_in BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await postgresPool.query(`
+      CREATE TABLE IF NOT EXISTS password_reset_tokens (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        token_hash TEXT NOT NULL UNIQUE,
+        expires_at TIMESTAMPTZ NOT NULL,
+        used_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);

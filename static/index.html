@@ -27,21 +27,44 @@
       .modal-card { width: min(440px, 100%); background: #fff; border-radius: 14px; padding: 24px; box-shadow: 0 20px 50px rgba(0, 0, 0, .25); }
       .modal-card h3 { margin-top: 0; }
       .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+      .danger-action { background: #c62828 !important; color: #fff !important; border-color: #a61f1f !important; }
+      .hero { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+      .admin-identity { display: flex; align-items: center; gap: 10px; min-width: 260px; padding: 9px 12px; background: rgba(255,255,255,.96); color: #172033; border: 1px solid rgba(255,255,255,.7); border-radius: 10px; box-shadow: 0 5px 14px rgba(10, 30, 60, .18); }
+      .admin-identity-logo { display: grid; width: 38px; height: 38px; flex: 0 0 38px; place-items: center; border-radius: 50%; background: #172d50; color: #fff; font-size: .75rem; font-weight: 800; letter-spacing: .04em; }
+      .admin-identity-details { display: grid; min-width: 0; gap: 2px; }
+      .admin-identity-details strong, .admin-identity-details span, .admin-identity-details small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .admin-identity-details strong { color: #172033; }
+      .admin-identity-details > span { color: #52627a; font-size: .82rem; }
+      .admin-identity-details small { color: #718096; font-size: .7rem; }
+      .admin-identity-logout { margin-left: auto; padding: 7px 9px; background: #c62828; color: #fff; opacity: 0; transform: translateX(5px); pointer-events: none; transition: opacity .18s ease, transform .18s ease, background .18s ease; }
+      .admin-identity:hover .admin-identity-logout, .admin-identity:focus-within .admin-identity-logout { opacity: 1; transform: translateX(0); pointer-events: auto; }
+      .admin-identity-logout:hover, .admin-identity-logout:focus-visible { background: #a61f1f; }
+      .page-top-actions { display: flex; align-items: center; gap: 10px; }
+      .auth-grid { grid-template-columns: minmax(280px, 420px); justify-content: center; }
+      .auth-register-link { display: block; margin-top: 16px; color: #2d5aa8; text-align: center; font-weight: 700; cursor: pointer; }
+      .auth-back-link { display: block; margin-top: 8px; color: #667085; text-align: center; font-weight: 700; cursor: pointer; }
+      .password-field { position: relative; }
+      .password-field input { width: 100%; padding-right: 46px; }
+      .password-toggle { position: absolute; top: 50%; right: 6px; display: grid; width: 34px; height: 34px; padding: 0; place-items: center; transform: translateY(-50%); background: transparent; color: #52627a; font-size: 1.05rem; }
+      .password-toggle:hover, .password-toggle:focus-visible { background: #eef3fa; color: #172d50; }
+      .password-error { min-height: 18px; margin: -4px 0 0; color: #c62828; font-size: .82rem; }
+      @media (max-width: 700px) { .hero { align-items: flex-start; flex-direction: column; gap: 14px; } .admin-identity { min-width: 0; width: 100%; } .admin-identity-logout { opacity: 1; transform: none; pointer-events: auto; } }
     </style>
   </head>
   <body>
-    <header class="hero"><div><h1>SecMyNet</h1><p>WiFi access and usage management</p></div></header>
+    <header class="hero"><div><h1>SecMyNet</h1><p>WiFi Access Management Portal</p></div><div id="adminIdentity" class="admin-identity hidden" aria-label="Logged-in administrator"><span id="adminIdentityLogo" class="admin-identity-logo" aria-hidden="true">AD</span><span class="admin-identity-details"><strong id="adminIdentityName"></strong><span id="adminIdentityEmail"></span><small><span id="adminIdentityRole"></span> · Logged since <time id="adminIdentityLoggedSince"></time></small></span><button id="adminIdentityLogout" class="admin-identity-logout" type="button">Logout</button></div></header>
     <main class="container">
       <div id="authSection" class="auth-grid">
-        <section class="card"><h2>Register</h2><form id="registerForm"><input type="text" name="name" placeholder="Full name" required /><input type="email" name="email" placeholder="Email" required /><input type="password" name="password" placeholder="Password" required /><button type="submit">Create Account</button></form></section>
-        <section class="card"><h2>Login</h2><form id="loginForm"><input type="email" name="email" placeholder="Email" required /><input type="password" name="password" placeholder="Password" required /><button type="submit">Login</button></form></section>
+        <section id="loginCard" class="card"><h2>Login</h2><form id="loginForm"><input type="email" name="email" placeholder="Email" required /><input type="password" name="password" placeholder="Password" maxlength="32" required /><button type="submit">Login</button></form><a id="showRegisterLink" class="auth-register-link">Register</a></section>
+        <section id="registerCard" class="card hidden"><h2>Create Account</h2><form id="registerForm"><input type="text" name="name" placeholder="Full name" required /><input type="email" name="email" placeholder="Email" required /><input type="tel" name="mobileNumber" placeholder="Mobile Number" autocomplete="tel" required /><div class="password-field"><input id="registerPassword" type="password" name="password" placeholder="Password" maxlength="32" required /><button class="password-toggle" type="button" data-password-toggle="registerPassword" aria-label="Show password" title="Show password">&#128065;</button></div><div class="password-field"><input id="confirmPassword" type="password" name="confirmPassword" placeholder="Confirm password" maxlength="32" required /><button class="password-toggle" type="button" data-password-toggle="confirmPassword" aria-label="Show confirm password" title="Show confirm password">&#128065;</button></div><p id="passwordError" class="password-error" role="alert" aria-live="polite"></p><button type="submit">Create Account</button></form><a id="showLoginLink" class="auth-back-link">Back to Login</a></section>
       </div>
 
       <section id="dashboard" class="portal hidden">
-        <aside class="sidebar"><div class="sidebar-brand"><strong>SecMyNet</strong><span>Admin workspace</span></div><nav id="sidebarNav" class="side-nav"><a href="#overview" data-page="overview">Overview</a><a href="#locations" data-page="locations">1. My Locations <span id="locationCount" class="nav-count">0</span></a><a href="#devices" data-page="devices">2. My Devices <span id="deviceCount" class="nav-count">0</span></a><a href="#users" data-page="users">3. My Users <span id="userCount" class="nav-count">0</span></a><a href="#manage" data-page="manage">4. Manage Locations</a><a href="#notifications" data-page="notifications">Notifications <span id="notificationCount" class="nav-count">0</span></a></nav><button id="logoutBtn" class="sidebar-logout">Logout</button></aside>
-        <div class="portal-content"><div class="page-top"><div><h2 id="pageTitle">Overview</h2><p id="pageDescription">A real-time summary of your managed WiFi network.</p></div><button id="backToListBtn" class="action-button hidden">← Back to list</button></div><div id="pageContent"></div></div>
+        <aside class="sidebar"><div class="sidebar-brand"><strong>SecMyNet</strong><span id="adminWorkspaceLabel">Admin workspace</span></div><nav id="sidebarNav" class="side-nav"><a href="#overview" data-page="overview">Overview</a><a href="#locations" data-page="locations">1. My Locations <span id="locationCount" class="nav-count">0</span></a><a href="#devices" data-page="devices">2. My Devices <span id="deviceCount" class="nav-count">0</span></a><a href="#users" data-page="users">3. Manage Users <span id="userCount" class="nav-count">0</span></a><a href="#manage" data-page="manage">4. Manage Locations</a><a href="#notifications" data-page="notifications">Notifications <span id="notificationCount" class="nav-count">0</span></a></nav></aside>
+        <div class="portal-content"><div class="page-top"><div><h2 id="pageTitle">Overview</h2><p id="pageDescription">A real-time summary of your managed WiFi network.</p></div><div class="page-top-actions"><button id="addDeviceTopBtn" class="action-button hidden" data-add="device">+ Add device</button><button id="backToListBtn" class="action-button hidden">← Back to list</button></div></div><div id="pageContent"></div></div>
       </section>
       <div id="notificationModal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-card"><h3>New Connection Request</h3><p id="notificationModalText"></p><div class="modal-actions"><button id="notificationAllowBtn">Allow</button><button id="notificationDenyBtn" class="secondary">Don't Allow</button></div></div></div>
+      <div id="confirmationModal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-card"><h3>Confirm action</h3><p id="confirmationModalText"></p><div class="modal-actions"><button id="confirmationYesBtn" class="danger-action">Yes</button><button id="confirmationNoBtn" class="secondary">No</button></div></div></div>
 
       <section id="userDashboard" class="portal hidden">
         <aside class="sidebar"><div class="sidebar-brand"><strong>SecMyNet</strong><span>My access portal</span></div><nav id="userSidebarNav" class="side-nav"><a href="#my-locations" data-user-page="locations">1. My Locations</a><a href="#my-devices" data-user-page="devices">2. My Devices</a><a href="#my-usage" data-user-page="usage">3. My Usage</a><a href="#my-account" data-user-page="account">4. My Account</a></nav><button id="userLogoutBtn" class="sidebar-logout">Logout</button></aside>

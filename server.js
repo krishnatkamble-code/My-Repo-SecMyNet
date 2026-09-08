@@ -10,6 +10,7 @@ const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const path = require('node:path');
 const { createHash, randomBytes } = require('node:crypto');
+const { InfluxDB, Point } = require('@influxdata/influxdb-client');
 
 const { initDb, run, all, get, makeId } = require('./db');
 const admin = (() => {
@@ -20,6 +21,15 @@ const admin = (() => {
   }
 })();
 let firebaseApp = null;
+const influxConfig = {
+  url: process.env.INFLUXDB_URL || '',
+  token: process.env.INFLUXDB_TOKEN || '',
+  org: process.env.INFLUXDB_ORG || '',
+  bucket: process.env.INFLUXDB_BUCKET || ''
+};
+const influxWriteApi = influxConfig.url && influxConfig.token && influxConfig.org && influxConfig.bucket
+  ? new InfluxDB({ url: influxConfig.url, token: influxConfig.token }).getWriteApi(influxConfig.org, influxConfig.bucket, 'ms')
+  : null;
 
 // Initialize Firebase Admin SDK if credentials are provided via env
 function initFirebase() {
@@ -49,15 +59,21 @@ function initFirebase() {
 }
 
 function sendFcm(tokens, payload) {
-  try {
+  const batches = [];
+  for (let index = 0; index < tokens.length; index += 500) {
+    batches.push(tokens.slice(index, index + 500));
+  }
+
+  return Promise.all(batches.map(async (batch) => {
+    try {
     initFirebase();
     if (!firebaseApp || !admin) {
       console.warn('Firebase admin not configured; skipping FCM send');
-      return Promise.resolve({ success: false, reason: 'no-firebase' });
+      return { success: false, reason: 'no-firebase' };
     }
 
     const message = {
-      tokens: tokens,
+      tokens: batch,
       data: payload.data || {},
       android: {
         priority: 'high',
@@ -70,10 +86,35 @@ function sendFcm(tokens, payload) {
         headers: { 'apns-priority': '10' }
       }
     };
-    return admin.messaging().sendMulticast(message);
+      return typeof admin.messaging().sendEachForMulticast === 'function'
+        ? admin.messaging().sendEachForMulticast(message)
+        : admin.messaging().sendMulticast(message);
+    } catch (err) {
+      console.error('sendFcm error', err);
+      return { success: false, reason: err.message };
+    }
+  }));
+}
+
+async function writeInfluxUsage({ routerId, clientMac, ip, hostname, rxBytes, txBytes, deltaRx, deltaTx, timestamp }) {
+  if (!influxWriteApi) return;
+
+  const point = new Point('router_client_usage')
+    .tag('router_id', routerId)
+    .tag('client_mac', clientMac)
+    .tag('ip', ip || 'unknown')
+    .tag('hostname', hostname || 'unknown')
+    .intField('rx_bytes', Math.max(0, Math.trunc(rxBytes)))
+    .intField('tx_bytes', Math.max(0, Math.trunc(txBytes)))
+    .intField('delta_rx', Math.max(0, Math.trunc(deltaRx)))
+    .intField('delta_tx', Math.max(0, Math.trunc(deltaTx)))
+    .timestamp(new Date(timestamp));
+
+  try {
+    influxWriteApi.writePoint(point);
+    await influxWriteApi.flush();
   } catch (err) {
-    console.error('sendFcm error', err);
-    return Promise.resolve({ success: false, reason: err.message });
+    console.error('InfluxDB usage write failed:', err.message);
   }
 }
 
@@ -106,6 +147,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.SERVER_HOST || '0.0.0.0';
 const JWT_SECRET = process.env.JWT_SECRET || 'secmynet-prod-secret';
+const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || `http://localhost:${PORT}`;
 
 app.use(helmet());
 app.use(cors());
@@ -128,12 +170,21 @@ async function ensureDb() {
 
 async function createAdminSeed() {
   await ensureDb();
-  const passwordHash = await bcrypt.hash('Admin@123', 10);
-  await run(
-    `INSERT OR IGNORE INTO users (id, name, email, password_hash, role, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    ['admin-1', 'SecMyNet Admin', 'admin@secmynet.com', passwordHash, 'admin', new Date().toISOString()]
-  );
+  const seeds = [
+    ['admin-1', 'SecMyNet Admin', 'admin@secmynet.com', 'Admin@123', 'admin'],
+    ['super-admin-1', 'SecMyNet Super Admin', 'superadmin@secmynet.com', 'SuperAdmin@123', 'super_admin']
+  ];
+  for (const [id, name, email, password, role] of seeds) {
+    const existing = await get('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+    if (!existing) {
+      const passwordHash = await bcrypt.hash(password, 10);
+      await run(
+        `INSERT INTO users (id, name, email, password_hash, role, access_status, created_at)
+         VALUES ($1, $2, $3, $4, $5, 'enabled', NOW())`,
+        [id, name, email, passwordHash, role]
+      );
+    }
+  }
 }
 
 function createToken(user) {
@@ -151,7 +202,7 @@ function sanitizeUser(user) {
   };
 }
 
-function authRequired(req, res, next) {
+async function authRequired(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
 
@@ -161,16 +212,29 @@ function authRequired(req, res, next) {
 
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    req.user = payload;
+    await ensureDb();
+    const user = await get('SELECT id, email, role, access_status FROM users WHERE id = $1', [payload.id]);
+    if (!user || user.access_status === 'disabled') {
+      return res.status(403).json({ message: 'This user account has been disabled. Contact your administrator.' });
+    }
+    req.user = { ...payload, role: user.role, email: user.email };
     next();
   } catch (error) {
+    if (error && error.statusCode) return res.status(error.statusCode).json({ message: error.message });
     return res.status(401).json({ message: 'Invalid or expired token.' });
   }
 }
 
 function adminRequired(req, res, next) {
-  if (!req.user || req.user.role !== 'admin') {
+  if (!req.user || !['admin', 'super_admin'].includes(req.user.role)) {
     return res.status(403).json({ message: 'Admin rights are required for this action.' });
+  }
+  next();
+}
+
+function superAdminRequired(req, res, next) {
+  if (!req.user || req.user.role !== 'super_admin') {
+    return res.status(403).json({ message: 'Super Admin rights are required for this action.' });
   }
   next();
 }
@@ -293,6 +357,17 @@ async function processTelemetry(routerId, clients = [], usage = []) {
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
         [makeId('usage'), routerId, mac, ip, hostname, rx, tx, delta_rx, delta_tx, now]
       );
+      await writeInfluxUsage({
+        routerId,
+        clientMac: mac,
+        ip,
+        hostname,
+        rxBytes: rx,
+        txBytes: tx,
+        deltaRx: delta_rx,
+        deltaTx: delta_tx,
+        timestamp: now
+      });
     }
   } catch (err) {
     console.error('processTelemetry error', err);
@@ -328,9 +403,10 @@ async function reconcileQuarantines() {
 }
 
 // Run reconciliation periodically to ensure quarantines are handled after restarts
-setInterval(() => {
+const quarantineReconciliationTimer = setInterval(() => {
   reconcileQuarantines().catch(err => console.error('reconcileQuarantines top-level error', err));
 }, 10 * 1000);
+quarantineReconciliationTimer.unref();
 
 app.get('/api/health', async (_req, res) => {
   await ensureDb();
@@ -339,10 +415,13 @@ app.get('/api/health', async (_req, res) => {
 
 app.post('/api/register', async (req, res) => {
   await ensureDb();
-  const { name, email, password } = req.body;
+  const { name, email, mobileNumber, password } = req.body;
 
-  if (!name || !email || !password) {
-    return res.status(400).json({ message: 'name, email, and password are required.' });
+  if (!name || !email || !mobileNumber || !password) {
+    return res.status(400).json({ message: 'name, email, mobileNumber, and password are required.' });
+  }
+  if (password.length > 32) {
+    return res.status(400).json({ message: 'Password must be 32 characters or fewer.' });
   }
 
   const duplicate = await get('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email]);
@@ -354,9 +433,9 @@ app.post('/api/register', async (req, res) => {
   const passwordHash = await bcrypt.hash(password, 12);
 
   await run(
-    `INSERT INTO users (id, name, email, password_hash, role, created_at)
-     VALUES ($1, $2, $3, $4, $5, NOW())`,
-    [userId, name, email, passwordHash, 'user']
+    `INSERT INTO users (id, name, email, mobile_number, password_hash, role, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+    [userId, name, email, mobileNumber, passwordHash, 'admin']
   );
 
   const user = await get('SELECT * FROM users WHERE id = $1', [userId]);
@@ -477,6 +556,161 @@ app.get('/api/dashboard', authRequired, adminRequired, async (req, res) => {
     connections: dashboardConnections,
     users: users.map(sanitizeUser)
   });
+});
+
+app.get('/api/super-admin/admins', authRequired, superAdminRequired, async (_req, res) => {
+  await ensureDb();
+  const admins = await all("SELECT * FROM users WHERE role = 'admin' ORDER BY created_at DESC");
+  const locations = await all('SELECT * FROM locations ORDER BY created_at DESC');
+  const devices = await all('SELECT * FROM devices ORDER BY created_at DESC');
+  res.json({
+    admins: admins.map((admin) => ({
+      ...sanitizeUser(admin),
+      locations: locations
+        .filter((location) => location.admin_id === admin.id)
+        .map((location) => ({
+          ...location,
+          devicesCount: devices.filter((device) => device.location_id === location.id).length
+        })),
+      devices: devices
+        .filter((device) => device.created_by === admin.id)
+        .map((device) => ({
+          ...device,
+          location: locations.find((location) => location.id === device.location_id) || null,
+          allowedUserIds: parseAllowedUsers(device.allowed_user_ids)
+        }))
+    }))
+  });
+});
+
+app.post('/api/super-admin/admins', authRequired, superAdminRequired, async (req, res) => {
+  await ensureDb();
+  const { name, email, password } = req.body || {};
+  if (!name || !email || !password) {
+    return res.status(400).json({ message: 'name, email, and password are required.' });
+  }
+  if (password.length > 32) return res.status(400).json({ message: 'Password must be 32 characters or fewer.' });
+  const duplicate = await get('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+  if (duplicate) return res.status(409).json({ message: 'A user with that email already exists.' });
+  const userId = makeId('admin');
+  const passwordHash = await bcrypt.hash(password, 12);
+  await run(
+    `INSERT INTO users (id, name, email, password_hash, role, access_status, created_at)
+     VALUES ($1, $2, $3, $4, 'admin', 'enabled', NOW())`,
+    [userId, name, email, passwordHash]
+  );
+  const adminUser = await get('SELECT * FROM users WHERE id = $1', [userId]);
+  res.status(201).json({ message: 'Admin created.', admin: sanitizeUser(adminUser) });
+});
+
+app.patch('/api/super-admin/admins/:adminId', authRequired, superAdminRequired, async (req, res) => {
+  await ensureDb();
+  const { name, email } = req.body || {};
+  if (!name || !email) return res.status(400).json({ message: 'name and email are required.' });
+  const adminUser = await get("SELECT * FROM users WHERE id = $1 AND role = 'admin'", [req.params.adminId]);
+  if (!adminUser) return res.status(404).json({ message: 'Admin user not found.' });
+  const duplicate = await get('SELECT id FROM users WHERE LOWER(email) = LOWER($1) AND id <> $2', [email, adminUser.id]);
+  if (duplicate) return res.status(409).json({ message: 'A user with that email already exists.' });
+  await run('UPDATE users SET name = $1, email = $2 WHERE id = $3', [name, email, adminUser.id]);
+  res.json({ message: 'Admin updated.', admin: sanitizeUser(await get('SELECT * FROM users WHERE id = $1', [adminUser.id])) });
+});
+
+app.post('/api/super-admin/admins/:adminId/send-reset-link', authRequired, superAdminRequired, async (req, res) => {
+  await ensureDb();
+  const adminUser = await get("SELECT * FROM users WHERE id = $1 AND role = 'admin'", [req.params.adminId]);
+  if (!adminUser) return res.status(404).json({ message: 'Admin user not found.' });
+  const rawToken = randomBytes(32).toString('hex');
+  await run('DELETE FROM password_reset_tokens WHERE user_id = $1', [adminUser.id]);
+  await run(
+    `INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at, created_at)
+     VALUES ($1, $2, $3, $4, NOW())`,
+    [makeId('reset'), adminUser.id, hashAgentToken(rawToken), new Date(Date.now() + 60 * 60 * 1000).toISOString()]
+  );
+  const resetLink = `${PUBLIC_APP_URL}/reset-password.html?token=${rawToken}`;
+  res.json({
+    message: `Password reset link generated for ${adminUser.email}.`,
+    resetLink,
+    expiresInMinutes: 60
+  });
+});
+
+app.post('/api/password-reset', async (req, res) => {
+  await ensureDb();
+  const { token, password } = req.body || {};
+  if (!token || !password) {
+    return res.status(400).json({ message: 'A reset token and password are required.' });
+  }
+  if (password.length > 32) {
+    return res.status(400).json({ message: 'Password must be 32 characters or fewer.' });
+  }
+  const reset = await get(
+    `SELECT * FROM password_reset_tokens
+     WHERE token_hash = $1 AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP`,
+    [hashAgentToken(token)]
+  );
+  if (!reset) return res.status(400).json({ message: 'This reset link is invalid or has expired.' });
+  const passwordHash = await bcrypt.hash(password, 12);
+  await run('UPDATE users SET password_hash = $1, access_status = $2 WHERE id = $3', [passwordHash, 'enabled', reset.user_id]);
+  await run('UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP WHERE id = $1', [reset.id]);
+  res.json({ message: 'Password reset successful. You can now log in.' });
+});
+
+app.post('/api/super-admin/users', authRequired, superAdminRequired, async (req, res) => {
+  await ensureDb();
+  const { name, email, password } = req.body || {};
+  if (!name || !email || !password) {
+    return res.status(400).json({ message: 'name, email, and password are required.' });
+  }
+  if (password.length > 32) return res.status(400).json({ message: 'Password must be 32 characters or fewer.' });
+  const duplicate = await get('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+  if (duplicate) return res.status(409).json({ message: 'A user with that email already exists.' });
+  const userId = makeId('user');
+  const passwordHash = await bcrypt.hash(password, 12);
+  await run(
+    `INSERT INTO users (id, name, email, password_hash, role, access_status, created_at)
+     VALUES ($1, $2, $3, $4, 'user', 'enabled', NOW())`,
+    [userId, name, email, passwordHash]
+  );
+  const createdUser = await get('SELECT * FROM users WHERE id = $1', [userId]);
+  res.status(201).json({ message: 'User added.', user: sanitizeUser(createdUser) });
+});
+
+app.post('/api/super-admin/admins/:adminId/toggle-access', authRequired, superAdminRequired, async (req, res) => {
+  await ensureDb();
+  const adminUser = await get("SELECT * FROM users WHERE id = $1 AND role = 'admin'", [req.params.adminId]);
+  if (!adminUser) return res.status(404).json({ message: 'Admin user not found.' });
+  const accessStatus = adminUser.access_status === 'disabled' ? 'enabled' : 'disabled';
+  await run('UPDATE users SET access_status = $1 WHERE id = $2', [accessStatus, adminUser.id]);
+  if (accessStatus === 'disabled') {
+    await run("UPDATE connections SET status = 'disconnected', disconnected_at = NOW() WHERE user_id = $1 AND status = 'connected'", [adminUser.id]);
+  }
+  res.json({ message: `Admin ${accessStatus}.`, admin: { ...sanitizeUser(adminUser), accessStatus } });
+});
+
+app.delete('/api/super-admin/users/:userId', authRequired, superAdminRequired, async (req, res) => {
+  await ensureDb();
+  const target = await get("SELECT * FROM users WHERE id = $1 AND role <> 'super_admin'", [req.params.userId]);
+  if (!target) return res.status(404).json({ message: 'User not found or cannot be deleted.' });
+
+  const devices = await all('SELECT id, allowed_user_ids FROM devices');
+  for (const device of devices) {
+    const allowedUserIds = parseAllowedUsers(device.allowed_user_ids).filter((id) => id !== target.id);
+    await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(allowedUserIds), device.id]);
+  }
+  await run('DELETE FROM connections WHERE user_id = $1', [target.id]);
+  await run('DELETE FROM notifications WHERE user_id = $1', [target.id]);
+  await run('DELETE FROM push_tokens WHERE user_id = $1', [target.id]);
+  await run('DELETE FROM admin_contacts WHERE user_id = $1', [target.id]);
+  if (target.role === 'admin') {
+    const locations = await all('SELECT id FROM locations WHERE admin_id = $1', [target.id]);
+    for (const location of locations) {
+      await run('DELETE FROM connections WHERE device_id IN (SELECT id FROM devices WHERE location_id = $1)', [location.id]);
+      await run('DELETE FROM devices WHERE location_id = $1', [location.id]);
+    }
+    await run('DELETE FROM locations WHERE admin_id = $1', [target.id]);
+  }
+  await run('DELETE FROM users WHERE id = $1', [target.id]);
+  res.json({ message: `${target.role === 'admin' ? 'Admin' : 'User'} deleted.` });
 });
 
 app.get('/api/user-dashboard', authRequired, async (req, res) => {
@@ -724,22 +958,27 @@ app.patch('/api/locations/:locationId', authRequired, adminRequired, async (req,
 
 app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
-  const { locationId, name, wifiName, ipAddress, status } = req.body;
+  const { locationId, routerId, name, wifiName, ipAddress, status } = req.body;
 
   if (!locationId || !name || !wifiName || !ipAddress) {
     return res.status(400).json({ message: 'locationId, name, wifiName, and ipAddress are required.' });
   }
 
   const ipParts = String(ipAddress).split('.');
-  if (ipParts.length !== 4 || ipParts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 256)) {
+  if (ipParts.length !== 4 || ipParts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255)) {
     return res.status(400).json({ message: 'Enter a valid IPv4 address, for example 192.168.255.254.' });
+  }
+
+  if (routerId) {
+    const router = await get('SELECT id FROM openwrt_routers WHERE id = $1', [routerId]);
+    if (!router) return res.status(404).json({ message: 'OpenWrt router not found.' });
   }
 
   const deviceId = makeId('device');
   await run(
-    `INSERT INTO devices (id, location_id, name, wifi_name, ip_address, status, allowed_user_ids, created_by, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
-    [deviceId, locationId, name, wifiName, ipAddress, status || 'allowed', '[]', req.user.id]
+    `INSERT INTO devices (id, location_id, router_id, name, wifi_name, ip_address, status, allowed_user_ids, created_by, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
+    [deviceId, locationId, routerId || null, name, wifiName, ipAddress, status || 'allowed', '[]', req.user.id]
   );
 
   const device = await get('SELECT * FROM devices WHERE id = $1', [deviceId]);
@@ -752,6 +991,37 @@ app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
   };
 
   res.status(201).json({ message: 'Device added.', device: payload });
+});
+
+app.patch('/api/devices/:deviceId', authRequired, adminRequired, async (req, res) => {
+  await ensureDb();
+  const { locationId, routerId, name, wifiName, ipAddress, status } = req.body;
+  const device = await get('SELECT * FROM devices WHERE id = $1', [req.params.deviceId]);
+
+  if (!device) {
+    return res.status(404).json({ message: 'Device not found.' });
+  }
+  if (!locationId || !name || !wifiName || !ipAddress) {
+    return res.status(400).json({ message: 'locationId, name, wifiName, and ipAddress are required.' });
+  }
+
+  const ipParts = String(ipAddress).split('.');
+  if (ipParts.length !== 4 || ipParts.some((part) => !/^\d{1,3}$/.test(part) || Number(part) > 255)) {
+    return res.status(400).json({ message: 'Enter a valid IPv4 address, for example 192.168.255.254.' });
+  }
+
+  if (routerId) {
+    const router = await get('SELECT id FROM openwrt_routers WHERE id = $1', [routerId]);
+    if (!router) return res.status(404).json({ message: 'OpenWrt router not found.' });
+  }
+
+  await run(
+    'UPDATE devices SET location_id = $1, router_id = $2, name = $3, wifi_name = $4, ip_address = $5, status = $6 WHERE id = $7',
+    [locationId, routerId || null, name, wifiName, ipAddress, status || device.status || 'allowed', device.id]
+  );
+  const updatedDevice = await get('SELECT * FROM devices WHERE id = $1', [device.id]);
+  const location = await get('SELECT * FROM locations WHERE id = $1', [updatedDevice.location_id]);
+  res.json({ message: 'Device updated.', device: { ...updatedDevice, location, allowedUserIds: parseAllowedUsers(updatedDevice.allowed_user_ids) } });
 });
 
 app.post('/api/devices/:deviceId/allow-user', authRequired, adminRequired, async (req, res) => {
@@ -821,8 +1091,6 @@ app.post('/api/devices/:deviceId/disconnect-user', authRequired, adminRequired, 
   res.json({ message: 'User disconnected from the device.', connection: { ...connection, status: 'disconnected' } });
 });
 
-// A restart request is recorded as an admin action. Actual router integration can
-// be attached here when managed device APIs are available.
 app.post('/api/devices/:deviceId/restart', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
   const device = await get('SELECT * FROM devices WHERE id = $1', [req.params.deviceId]);
@@ -831,7 +1099,17 @@ app.post('/api/devices/:deviceId/restart', authRequired, adminRequired, async (r
     return res.status(404).json({ message: 'Device not found.' });
   }
 
-  res.json({ message: `Restart request sent to ${device.name}.`, deviceId: device.id });
+  if (device.router_id) {
+    const commandId = makeId('openwrt-command');
+    await run(
+      `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())`,
+      [commandId, device.router_id, 'restart', '{}', 'queued']
+    );
+    return res.json({ message: `Restart request queued for ${device.name}.`, deviceId: device.id, commandId });
+  }
+
+  res.json({ message: `Restart request recorded for ${device.name}; no OpenWrt router is linked.`, deviceId: device.id });
 });
 
 app.post('/api/users/:userId/toggle-access', authRequired, adminRequired, async (req, res) => {

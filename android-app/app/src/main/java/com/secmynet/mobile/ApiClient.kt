@@ -25,7 +25,7 @@ class ApiClient(private val baseUrl: String = BuildConfig.API_BASE_URL) {
     fun dashboard(token: String): JSONObject {
         val profile = profile(token)
         val role = profile.getJSONObject("user").optString("role", "user")
-        return if (role == "admin") {
+        return if (role == "admin" || role == "super_admin") {
             getJson("/api/dashboard", token)
         } else {
             getJson("/api/user-dashboard", token)

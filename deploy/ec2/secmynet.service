@@ -1,0 +1,21 @@
+[Unit]
+Description=SecMyNet Node.js API
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=secmynet
+Group=secmynet
+WorkingDirectory=/opt/secmynet
+EnvironmentFile=/etc/secmynet/secmynet.env
+ExecStart=/usr/bin/node /opt/secmynet/server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/opt/secmynet/data
+
+[Install]
+WantedBy=multi-user.target

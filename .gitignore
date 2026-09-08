@@ -20,7 +20,7 @@ build/
 .idea/
 
 # Android local properties
-**/android/local.properties
+**/local.properties
 
 # Flutter build
 **/build/

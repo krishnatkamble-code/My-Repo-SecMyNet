@@ -16,3 +16,12 @@ This folder contains a minimal Jetpack Compose Android app skeleton that is wire
    ./gradlew :app:assembleRemoteDebug
    ```
 6. Build and run the app on an emulator or Android device.
+
+## Android 14 cellular test
+
+For an out-of-band test, set `API_BASE_URL_REMOTE` to the public HTTPS URL of
+the EC2 deployment, build `remoteDebug`, and disable Wi-Fi on the Android 14
+device. Do not use the EC2 private IP or cleartext HTTP for this test. The
+Flutter template in `mobile/flutter-template` includes FCM token registration;
+the backend accepts those tokens at `POST /api/me/push-token` and sends admin
+connection requests through Firebase Cloud Messaging.
