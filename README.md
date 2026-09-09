@@ -25,7 +25,7 @@ review each admin's devices and locations, add or delete users, and block admin
 portal access.
 
 - Email: superadmin@secmynet.com
-- Password: SuperAdmin@123
+- Password: Password@97
 
 Change this password immediately in a production deployment.
 

@@ -183,17 +183,19 @@ async function createAdminSeed() {
   await ensureDb();
   const seeds = [
     ['admin-1', 'SecMyNet Admin', 'admin@secmynet.com', 'Admin@123', 'admin'],
-    ['super-admin-1', 'SecMyNet Super Admin', 'superadmin@secmynet.com', 'SuperAdmin@123', 'super_admin']
+    ['super-admin-1', 'SecMyNet Super Admin', 'superadmin@secmynet.com', 'Password@97', 'super_admin']
   ];
   for (const [id, name, email, password, role] of seeds) {
     const existing = await get('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+    const passwordHash = await bcrypt.hash(password, 10);
     if (!existing) {
-      const passwordHash = await bcrypt.hash(password, 10);
       await run(
         `INSERT INTO users (id, name, email, password_hash, role, access_status, created_at)
          VALUES ($1, $2, $3, $4, $5, 'enabled', NOW())`,
         [id, name, email, passwordHash, role]
       );
+    } else if (role === 'super_admin') {
+      await run('UPDATE users SET password_hash = $1, access_status = $2 WHERE id = $3', [passwordHash, 'enabled', existing.id]);
     }
   }
 }
