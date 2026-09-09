@@ -69,9 +69,18 @@
         gap: 16px;
       }
       .super-form input {
-        background: #0f172a;
+        background: #0f172a !important;
         border: 1px solid #334155;
-        color: #fff;
+        color: #ffffff !important;
+        caret-color: #ffffff;
+        font-size: 1rem;
+      }
+      .super-form input:-webkit-autofill,
+      .super-form input:-webkit-autofill:hover,
+      .super-form input:-webkit-autofill:focus {
+        -webkit-text-fill-color: #ffffff !important;
+        -webkit-box-shadow: 0 0 0px 1000px #0f172a inset !important;
+        transition: background-color 5000s ease-in-out 0s;
       }
       .super-form input:focus {
         border-color: #f59e0b;
@@ -94,22 +103,27 @@
       }
       .password-field {
         position: relative;
+        display: flex;
+        align-items: center;
       }
       .password-field input {
         width: 100%;
-        padding-right: 44px;
+        padding-right: 48px;
       }
       .password-toggle {
         position: absolute;
-        top: 50%;
-        right: 6px;
-        transform: translateY(-50%);
+        right: 8px;
         background: transparent;
         border: none;
         color: #94a3b8;
         cursor: pointer;
         padding: 6px;
-        font-size: 1.1rem;
+        font-size: 1.2rem;
+        z-index: 2;
+        user-select: none;
+      }
+      .password-toggle:hover {
+        color: #f59e0b;
       }
       .error-box {
         padding: 10px 14px;
@@ -158,7 +172,7 @@
             <label style="display:block; margin-bottom:6px; font-size:0.85rem; color:#cbd5e1;">Password</label>
             <div class="password-field">
               <input id="superPassword" type="password" name="password" placeholder="••••••••" maxlength="32" required />
-              <button id="togglePassBtn" type="button" class="password-toggle" aria-label="Show password">👁️</button>
+              <button id="togglePassBtn" type="button" class="password-toggle" aria-label="Show password" title="Show password">👁️</button>
             </div>
           </div>
           <button type="submit" class="super-btn">Access Console →</button>
@@ -174,9 +188,14 @@
         const togglePassBtn = document.getElementById('togglePassBtn');
 
         if (togglePassBtn && passInput) {
-          togglePassBtn.addEventListener('click', () => {
+          togglePassBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
             const isPass = passInput.type === 'password';
             passInput.type = isPass ? 'text' : 'password';
+            togglePassBtn.textContent = isPass ? '🙈' : '👁️';
+            togglePassBtn.setAttribute('aria-label', isPass ? 'Hide password' : 'Show password');
+            togglePassBtn.title = isPass ? 'Hide password' : 'Show password';
           });
         }
 
