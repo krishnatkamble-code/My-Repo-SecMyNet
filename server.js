@@ -12,7 +12,7 @@ const path = require('node:path');
 const { createHash, randomBytes } = require('node:crypto');
 const { InfluxDB, Point } = require('@influxdata/influxdb-client');
 
-const { initDb, run, all, get, makeId } = require('./db');
+const { initDb, run, all, get, makeId, isPostgresConfigured, isVercel } = require('./db');
 const admin = (() => {
   try {
     return require('firebase-admin');
@@ -165,8 +165,18 @@ app.use(
   })
 );
 
+let seedInitialized = false;
+
 async function ensureDb() {
   await initDb();
+  if (!seedInitialized) {
+    seedInitialized = true;
+    try {
+      await createAdminSeed();
+    } catch (err) {
+      console.warn('Admin seed initialization skipped or completed:', err.message);
+    }
+  }
 }
 
 async function createAdminSeed() {
@@ -411,7 +421,13 @@ quarantineReconciliationTimer.unref();
 
 app.get('/api/health', async (_req, res) => {
   await ensureDb();
-  res.json({ status: 'ok', message: 'SecMyNet portal API is running' });
+  res.json({
+    status: 'ok',
+    message: 'SecMyNet portal API is running',
+    environment: isVercel ? 'vercel' : 'standard',
+    database: isPostgresConfigured ? 'postgres' : 'sqlite',
+    persistentStorage: isPostgresConfigured
+  });
 });
 
 app.post('/api/register', async (req, res) => {

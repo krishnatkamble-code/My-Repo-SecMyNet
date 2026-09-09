@@ -80,6 +80,16 @@ Use a hosted PostgreSQL service by copying the production environment template a
 
 For Azure App Service deployment steps, see [azure-app-service/README.md](azure-app-service/README.md).
 
+## Vercel deployment
+
+SecMyNet supports serverless deployment on Vercel:
+
+1. Import the repository into your Vercel dashboard.
+2. In **Project Settings > Environment Variables**, add:
+   - `DATABASE_URL`: Connection string for a PostgreSQL database (e.g. Neon, Supabase, Vercel Postgres, or Railway)
+   - `JWT_SECRET`: A secure random secret string
+3. Deploy! The serverless functions on Vercel will automatically connect to PostgreSQL and maintain full persistent user data and sessions across cold starts.
+
 ## AWS EC2, InfluxDB, and FCM deployment
 
 The backend supports an AWS EC2 deployment profile for a `t3.medium`. It keeps PostgreSQL as the relational store, writes OpenWrt client telemetry to InfluxDB v2.7 when configured, and delivers connection/quarantine notifications with Firebase Cloud Messaging. Follow [deploy/ec2/README.md](deploy/ec2/README.md) for the systemd service, environment variables, and Android 14 cellular test procedure.

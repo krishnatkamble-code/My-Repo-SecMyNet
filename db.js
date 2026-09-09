@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const initSqlJs = require('sql.js');
 const { Pool } = require('pg');
@@ -26,7 +27,10 @@ function resolveDatabaseUrl() {
 
 const DATABASE_URL = resolveDatabaseUrl();
 const isPostgresConfigured = /^postgres(ql)?:\/\//i.test(DATABASE_URL);
-const DATA_DIR = path.join(__dirname, 'data');
+const isVercel = Boolean(process.env.VERCEL || process.env.NOW_BUILDER_ANNOTATION);
+const DATA_DIR = isVercel
+  ? path.join(os.tmpdir(), 'secmynet-data')
+  : path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'secmynet.sqlite');
 
 let sqliteDb = null;
@@ -35,8 +39,12 @@ let postgresPool = null;
 let initialized = false;
 
 function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+  } catch (err) {
+    console.warn('Could not create data directory:', err.message);
   }
 }
 
@@ -46,11 +54,26 @@ async function initSqliteDb() {
   }
 
   ensureDataDir();
-  const SQL = await initSqlJs({
-    locateFile: (file) => path.join(__dirname, 'node_modules', 'sql.js', 'dist', file)
-  });
 
-  const bytes = fs.existsSync(DB_FILE) ? fs.readFileSync(DB_FILE) : null;
+  let locateFile = (file) => path.join(__dirname, 'node_modules', 'sql.js', 'dist', file);
+  try {
+    const resolvedWasm = require.resolve('sql.js/dist/sql-wasm.wasm');
+    const resolvedDir = path.dirname(resolvedWasm);
+    locateFile = (file) => path.join(resolvedDir, file);
+  } catch (e) {
+    // fallback to default locateFile
+  }
+
+  const SQL = await initSqlJs({ locateFile });
+
+  let bytes = null;
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      bytes = fs.readFileSync(DB_FILE);
+    }
+  } catch (err) {
+    console.warn('Could not read SQLite database file:', err.message);
+  }
   sqliteDb = bytes ? new SQL.Database(bytes) : new SQL.Database();
 
   sqliteDb.run(`CREATE TABLE IF NOT EXISTS users (
@@ -198,8 +221,12 @@ async function initSqliteDb() {
 
 function persistSqliteDb() {
   if (!sqliteDb) return;
-  const binary = Buffer.from(sqliteDb.export());
-  fs.writeFileSync(DB_FILE, binary);
+  try {
+    const binary = Buffer.from(sqliteDb.export());
+    fs.writeFileSync(DB_FILE, binary);
+  } catch (err) {
+    console.warn('Could not persist SQLite DB to disk:', err.message);
+  }
 }
 
 function normalizeSqliteSql(sql) {
@@ -441,5 +468,7 @@ module.exports = {
   all,
   get,
   makeId,
+  isPostgresConfigured,
+  isVercel,
   pool: postgresPool
 };
