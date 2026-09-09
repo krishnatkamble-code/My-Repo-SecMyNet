@@ -154,6 +154,7 @@ app.use(cors());
 app.use(compression());
 app.use(morgan('tiny'));
 app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'static')));
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 app.use(
@@ -464,14 +465,22 @@ app.post('/api/register', async (req, res) => {
 
 app.post('/api/login', async (req, res) => {
   await ensureDb();
-  const { email, password } = req.body;
-  const user = await get('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+  const rawEmail = req.body?.email || req.query?.email || '';
+  const rawPassword = req.body?.password || req.query?.password || '';
+  const cleanEmail = String(rawEmail).trim().toLowerCase();
+  const cleanPassword = String(rawPassword).trim();
+
+  if (!cleanEmail || !cleanPassword) {
+    return res.status(400).json({ message: 'Email and password are required.' });
+  }
+
+  const user = await get('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [cleanEmail]);
 
   if (!user) {
     return res.status(401).json({ message: 'Invalid email or password.' });
   }
 
-  const passwordMatches = await bcrypt.compare(password, user.password_hash);
+  const passwordMatches = await bcrypt.compare(cleanPassword, user.password_hash);
   if (!passwordMatches) {
     return res.status(401).json({ message: 'Invalid email or password.' });
   }
@@ -489,9 +498,10 @@ app.post('/api/login', async (req, res) => {
 
 async function handleSuperAdminLogin(req, res) {
   await ensureDb();
-  const { email, password } = req.body || {};
-  const cleanEmail = (email || '').trim().toLowerCase();
-  const cleanPassword = (password || '').trim();
+  const rawEmail = req.body?.email || req.query?.email || '';
+  const rawPassword = req.body?.password || req.query?.password || '';
+  const cleanEmail = String(rawEmail).trim().toLowerCase();
+  const cleanPassword = String(rawPassword).trim();
 
   if (!cleanEmail || !cleanPassword) {
     return res.status(400).json({ message: 'Email and password are required.' });

@@ -207,8 +207,12 @@
             errorBox.style.display = 'none';
             errorBox.textContent = '';
 
-            const formData = new FormData(form);
-            const payload = Object.fromEntries(formData);
+            const emailInput = form.querySelector('input[name="email"]');
+            const passInput = form.querySelector('input[name="password"]');
+            const payload = {
+              email: (emailInput ? emailInput.value : '').trim(),
+              password: (passInput ? passInput.value : '').trim()
+            };
 
             try {
               const res = await fetch('/api/super-admin/login', {
