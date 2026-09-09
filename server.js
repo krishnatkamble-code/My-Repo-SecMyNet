@@ -777,6 +777,32 @@ app.delete('/api/super-admin/users/:userId', authRequired, superAdminRequired, a
   res.json({ message: `${target.role === 'admin' ? 'Admin' : 'User'} deleted.` });
 });
 
+app.delete('/api/users/:userId', authRequired, adminRequired, async (req, res) => {
+  await ensureDb();
+  const target = await get("SELECT * FROM users WHERE id = $1 AND role <> 'super_admin'", [req.params.userId]);
+  if (!target) return res.status(404).json({ message: 'User not found or cannot be deleted.' });
+
+  const devices = await all('SELECT id, allowed_user_ids FROM devices');
+  for (const device of devices) {
+    const allowedUserIds = parseAllowedUsers(device.allowed_user_ids).filter((id) => id !== target.id);
+    await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(allowedUserIds), device.id]);
+  }
+  await run('DELETE FROM connections WHERE user_id = $1', [target.id]);
+  await run('DELETE FROM notifications WHERE user_id = $1', [target.id]);
+  await run('DELETE FROM push_tokens WHERE user_id = $1', [target.id]);
+  await run('DELETE FROM admin_contacts WHERE user_id = $1', [target.id]);
+  if (target.role === 'admin') {
+    const locations = await all('SELECT id FROM locations WHERE admin_id = $1', [target.id]);
+    for (const location of locations) {
+      await run('DELETE FROM connections WHERE device_id IN (SELECT id FROM devices WHERE location_id = $1)', [location.id]);
+      await run('DELETE FROM devices WHERE location_id = $1', [location.id]);
+    }
+    await run('DELETE FROM locations WHERE admin_id = $1', [target.id]);
+  }
+  await run('DELETE FROM users WHERE id = $1', [target.id]);
+  res.json({ message: `${target.role === 'admin' ? 'Admin' : 'User'} deleted.` });
+});
+
 app.get('/api/user-dashboard', authRequired, async (req, res) => {
   await ensureDb();
 
@@ -1020,6 +1046,25 @@ app.patch('/api/locations/:locationId', authRequired, adminRequired, async (req,
   res.json({ message: 'Location updated.', location });
 });
 
+app.delete('/api/locations/:locationId', authRequired, adminRequired, async (req, res) => {
+  await ensureDb();
+  const location = await get('SELECT * FROM locations WHERE id = $1', [req.params.locationId]);
+  if (!location) {
+    return res.status(404).json({ message: 'Location not found.' });
+  }
+
+  const devices = await all('SELECT id FROM devices WHERE location_id = $1', [location.id]);
+  for (const dev of devices) {
+    await run('DELETE FROM connections WHERE device_id = $1', [dev.id]);
+    await run('DELETE FROM notifications WHERE device_id = $1', [dev.id]);
+  }
+  await run('DELETE FROM devices WHERE location_id = $1', [location.id]);
+  await run('DELETE FROM openwrt_routers WHERE location_id = $1', [location.id]);
+  await run('DELETE FROM notifications WHERE location_id = $1', [location.id]);
+  await run('DELETE FROM locations WHERE id = $1', [location.id]);
+  res.json({ message: 'Location deleted.' });
+});
+
 app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
   const { locationId, routerId, name, wifiName, ipAddress, status } = req.body;
@@ -1086,6 +1131,19 @@ app.patch('/api/devices/:deviceId', authRequired, adminRequired, async (req, res
   const updatedDevice = await get('SELECT * FROM devices WHERE id = $1', [device.id]);
   const location = await get('SELECT * FROM locations WHERE id = $1', [updatedDevice.location_id]);
   res.json({ message: 'Device updated.', device: { ...updatedDevice, location, allowedUserIds: parseAllowedUsers(updatedDevice.allowed_user_ids) } });
+});
+
+app.delete('/api/devices/:deviceId', authRequired, adminRequired, async (req, res) => {
+  await ensureDb();
+  const device = await get('SELECT * FROM devices WHERE id = $1', [req.params.deviceId]);
+  if (!device) {
+    return res.status(404).json({ message: 'Device not found.' });
+  }
+
+  await run('DELETE FROM connections WHERE device_id = $1', [device.id]);
+  await run('DELETE FROM notifications WHERE device_id = $1', [device.id]);
+  await run('DELETE FROM devices WHERE id = $1', [device.id]);
+  res.json({ message: 'Device deleted.' });
 });
 
 app.post('/api/devices/:deviceId/allow-user', authRequired, adminRequired, async (req, res) => {
