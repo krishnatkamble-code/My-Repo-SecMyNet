@@ -165,17 +165,12 @@ app.use(
   })
 );
 
-let seedInitialized = false;
-
 async function ensureDb() {
   await initDb();
-  if (!seedInitialized) {
-    seedInitialized = true;
-    try {
-      await createAdminSeed();
-    } catch (err) {
-      console.warn('Admin seed initialization skipped or completed:', err.message);
-    }
+  try {
+    await createAdminSeed();
+  } catch (err) {
+    console.warn('Admin seed check:', err.message);
   }
 }
 
@@ -185,7 +180,7 @@ async function createAdminSeed() {
     ['super-admin-1', 'SecMyNet Super Admin', 'superadmin@secmynet.com', 'Password@97', 'super_admin']
   ];
   for (const [id, name, email, password, role] of seeds) {
-    const existing = await get('SELECT id FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+    const existing = await get('SELECT id, password_hash, role FROM users WHERE LOWER(email) = LOWER($1)', [email]);
     const passwordHash = await bcrypt.hash(password, 10);
     if (!existing) {
       await run(
@@ -194,7 +189,10 @@ async function createAdminSeed() {
         [id, name, email, passwordHash, role]
       );
     } else if (role === 'super_admin') {
-      await run('UPDATE users SET password_hash = $1, role = $2, access_status = $3 WHERE id = $4', [passwordHash, 'super_admin', 'enabled', existing.id]);
+      const matches = await bcrypt.compare(password, existing.password_hash);
+      if (!matches || existing.role !== 'super_admin') {
+        await run('UPDATE users SET password_hash = $1, role = $2, access_status = $3 WHERE id = $4', [passwordHash, 'super_admin', 'enabled', existing.id]);
+      }
     }
   }
 }
