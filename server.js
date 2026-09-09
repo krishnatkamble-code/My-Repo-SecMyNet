@@ -488,6 +488,39 @@ app.post('/api/login', async (req, res) => {
   });
 });
 
+app.post('/api/super-admin/login', async (req, res) => {
+  await ensureDb();
+  const { email, password } = req.body || {};
+  if (!email || !password) {
+    return res.status(400).json({ message: 'Email and password are required.' });
+  }
+
+  const user = await get('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+
+  if (!user) {
+    return res.status(401).json({ message: 'Invalid email or password.' });
+  }
+
+  const passwordMatches = await bcrypt.compare(password, user.password_hash);
+  if (!passwordMatches) {
+    return res.status(401).json({ message: 'Invalid email or password.' });
+  }
+
+  if (user.role !== 'super_admin') {
+    return res.status(403).json({ message: 'Access Denied: This login portal is strictly reserved for Super Administrators.' });
+  }
+
+  if (user.access_status === 'disabled') {
+    return res.status(403).json({ message: 'This Super Admin account has been disabled.' });
+  }
+
+  res.json({
+    message: 'Super Admin login successful.',
+    token: createToken(user),
+    user: sanitizeUser(user)
+  });
+});
+
 app.get('/api/profile', authRequired, async (req, res) => {
   await ensureDb();
   const user = await get('SELECT * FROM users WHERE id = $1', [req.user.id]);

@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SecMyNet - Super Admin Console</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>" />
+    <script src="perf-guard.js"></script>
+    <link rel="stylesheet" href="styles.css" />
+    <style>
+      body {
+        background: #0b1329;
+        color: #e2e8f0;
+      }
+      .super-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 24px 32px;
+        background: linear-gradient(135deg, #0f203c 0%, #172d50 100%);
+        border-bottom: 2px solid #d97706;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+      }
+      .super-brand {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+      .super-badge {
+        display: inline-block;
+        padding: 4px 10px;
+        background: #d97706;
+        color: #0b1329;
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        border-radius: 4px;
+      }
+      .super-container {
+        display: grid;
+        place-items: center;
+        min-height: calc(100vh - 120px);
+        padding: 24px;
+      }
+      .super-card {
+        width: min(440px, 100%);
+        background: #152238;
+        border: 1px solid rgba(217, 119, 6, 0.3);
+        border-radius: 16px;
+        padding: 36px;
+        box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+      }
+      .super-card h2 {
+        margin-top: 0;
+        margin-bottom: 6px;
+        color: #fff;
+        font-size: 1.6rem;
+      }
+      .super-card p.subtitle {
+        margin-top: 0;
+        margin-bottom: 24px;
+        color: #94a3b8;
+        font-size: 0.9rem;
+      }
+      .super-form {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+      }
+      .super-form input {
+        background: #0f172a;
+        border: 1px solid #334155;
+        color: #fff;
+      }
+      .super-form input:focus {
+        border-color: #f59e0b;
+        outline: none;
+        box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
+      }
+      .super-btn {
+        background: linear-gradient(135deg, #d97706 0%, #b45309 100%);
+        color: #fff;
+        font-weight: 700;
+        padding: 12px;
+        border-radius: 8px;
+        border: none;
+        cursor: pointer;
+        font-size: 1rem;
+        transition: transform 0.1s ease, filter 0.15s ease;
+      }
+      .super-btn:hover {
+        filter: brightness(1.1);
+      }
+      .password-field {
+        position: relative;
+      }
+      .password-field input {
+        width: 100%;
+        padding-right: 44px;
+      }
+      .password-toggle {
+        position: absolute;
+        top: 50%;
+        right: 6px;
+        transform: translateY(-50%);
+        background: transparent;
+        border: none;
+        color: #94a3b8;
+        cursor: pointer;
+        padding: 6px;
+        font-size: 1.1rem;
+      }
+      .error-box {
+        padding: 10px 14px;
+        background: rgba(220, 38, 38, 0.15);
+        border: 1px solid rgba(220, 38, 38, 0.4);
+        color: #f87171;
+        border-radius: 8px;
+        font-size: 0.85rem;
+        display: none;
+      }
+      .back-portal {
+        display: block;
+        margin-top: 20px;
+        color: #64748b;
+        text-align: center;
+        font-size: 0.85rem;
+        text-decoration: none;
+      }
+      .back-portal:hover {
+        color: #cbd5e1;
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="super-header">
+      <div class="super-brand">
+        <span style="font-size: 1.8rem;">🛡️</span>
+        <div>
+          <h1 style="margin:0; font-size:1.3rem; color:#fff;">SecMyNet</h1>
+          <span class="super-badge">Super Admin Portal</span>
+        </div>
+      </div>
+    </header>
+    <main class="super-container">
+      <section class="super-card">
+        <h2>Super Admin Login</h2>
+        <p class="subtitle">Restricted Console. Authorized system administrators only.</p>
+        <div id="errorBox" class="error-box" role="alert"></div>
+        <form id="superLoginForm" class="super-form">
+          <div>
+            <label style="display:block; margin-bottom:6px; font-size:0.85rem; color:#cbd5e1;">Super Admin Email</label>
+            <input type="email" name="email" placeholder="superadmin@secmynet.com" required />
+          </div>
+          <div>
+            <label style="display:block; margin-bottom:6px; font-size:0.85rem; color:#cbd5e1;">Password</label>
+            <div class="password-field">
+              <input id="superPassword" type="password" name="password" placeholder="••••••••" maxlength="32" required />
+              <button id="togglePassBtn" type="button" class="password-toggle" aria-label="Show password">👁️</button>
+            </div>
+          </div>
+          <button type="submit" class="super-btn">Access Console →</button>
+        </form>
+        <a href="index.html" class="back-portal">← Return to Standard Admin Portal</a>
+      </section>
+    </main>
+    <script>
+      const form = document.getElementById('superLoginForm');
+      const errorBox = document.getElementById('errorBox');
+      const passInput = document.getElementById('superPassword');
+      const togglePassBtn = document.getElementById('togglePassBtn');
+
+      togglePassBtn.onclick = () => {
+        const isPass = passInput.type === 'password';
+        passInput.type = isPass ? 'text' : 'password';
+      };
+
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        errorBox.style.display = 'none';
+        errorBox.textContent = '';
+
+        const formData = new FormData(form);
+        const payload = Object.fromEntries(formData);
+
+        try {
+          const res = await fetch('/api/super-admin/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            throw new Error(data.message || 'Login failed.');
+          }
+
+          localStorage.setItem('secmynet-token', data.token);
+          window.location.href = 'index.html#users';
+        } catch (err) {
+          errorBox.textContent = err.message;
+          errorBox.style.display = 'block';
+        }
+      };
+    </script>
+  </body>
+</html>
