@@ -180,7 +180,6 @@ async function ensureDb() {
 }
 
 async function createAdminSeed() {
-  await ensureDb();
   const seeds = [
     ['admin-1', 'SecMyNet Admin', 'admin@secmynet.com', 'Admin@123', 'admin'],
     ['super-admin-1', 'SecMyNet Super Admin', 'superadmin@secmynet.com', 'Password@97', 'super_admin']
@@ -195,7 +194,7 @@ async function createAdminSeed() {
         [id, name, email, passwordHash, role]
       );
     } else if (role === 'super_admin') {
-      await run('UPDATE users SET password_hash = $1, access_status = $2 WHERE id = $3', [passwordHash, 'enabled', existing.id]);
+      await run('UPDATE users SET password_hash = $1, role = $2, access_status = $3 WHERE id = $4', [passwordHash, 'super_admin', 'enabled', existing.id]);
     }
   }
 }
@@ -493,17 +492,20 @@ app.post('/api/login', async (req, res) => {
 app.post('/api/super-admin/login', async (req, res) => {
   await ensureDb();
   const { email, password } = req.body || {};
-  if (!email || !password) {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  const cleanPassword = (password || '').trim();
+
+  if (!cleanEmail || !cleanPassword) {
     return res.status(400).json({ message: 'Email and password are required.' });
   }
 
-  const user = await get('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [email]);
+  const user = await get('SELECT * FROM users WHERE LOWER(email) = LOWER($1)', [cleanEmail]);
 
   if (!user) {
     return res.status(401).json({ message: 'Invalid email or password.' });
   }
 
-  const passwordMatches = await bcrypt.compare(password, user.password_hash);
+  const passwordMatches = await bcrypt.compare(cleanPassword, user.password_hash);
   if (!passwordMatches) {
     return res.status(401).json({ message: 'Invalid email or password.' });
   }
