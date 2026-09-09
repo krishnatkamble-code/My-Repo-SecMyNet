@@ -487,7 +487,7 @@ app.post('/api/login', async (req, res) => {
   });
 });
 
-app.post('/api/super-admin/login', async (req, res) => {
+async function handleSuperAdminLogin(req, res) {
   await ensureDb();
   const { email, password } = req.body || {};
   const cleanEmail = (email || '').trim().toLowerCase();
@@ -521,7 +521,9 @@ app.post('/api/super-admin/login', async (req, res) => {
     token: createToken(user),
     user: sanitizeUser(user)
   });
-});
+}
+
+app.post(['/api/super-admin/login', '/superadmin.html', '/superadmin', '/super-admin'], handleSuperAdminLogin);
 
 app.get('/api/profile', authRequired, async (req, res) => {
   await ensureDb();
@@ -1270,8 +1272,15 @@ app.post('/api/connections/:connectionId/usage', authRequired, adminRequired, as
   res.json({ message: 'Usage updated.', connection: { ...connection, dataUsedMb: nextUsage } });
 });
 
-app.use((_req, res) => {
-  res.status(404).json({ message: 'Route not found.' });
+app.get(['/superadmin', '/super-admin', '/superadmin/'], (_req, res) => {
+  res.sendFile(path.join(__dirname, 'static', 'superadmin.html'));
+});
+
+app.use((req, res) => {
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({ message: 'Route not found.' });
+  }
+  res.sendFile(path.join(__dirname, 'static', 'index.html'));
 });
 
 if (require.main === module) {
