@@ -149,7 +149,20 @@ const HOST = process.env.SERVER_HOST || '0.0.0.0';
 const JWT_SECRET = process.env.JWT_SECRET || 'secmynet-prod-secret';
 const PUBLIC_APP_URL = process.env.PUBLIC_APP_URL || `http://localhost:${PORT}`;
 
-app.use(helmet());
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrcAttr: ["'unsafe-inline'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", "data:", "blob:"],
+        connectSrc: ["'self'"]
+      }
+    }
+  })
+);
 app.use(cors());
 app.use(compression());
 app.use(morgan('tiny'));
@@ -526,10 +539,35 @@ async function handleSuperAdminLogin(req, res) {
     return res.status(403).json({ message: 'This Super Admin account has been disabled.' });
   }
 
+  const token = createToken(user);
+  const sanitizedUser = sanitizeUser(user);
+
+  const isHtmlSubmission = req.is('application/x-www-form-urlencoded') || (req.headers.accept && req.headers.accept.includes('text/html'));
+  if (isHtmlSubmission) {
+    return res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SecMyNet - Authenticating...</title>
+</head>
+<body style="background:#0b1329; color:#e2e8f0; font-family:sans-serif; display:grid; place-items:center; min-height:100vh;">
+  <div style="text-align:center;">
+    <h2>Super Admin Authentication Successful</h2>
+    <p>Redirecting to dashboard...</p>
+    <script>
+      localStorage.setItem('secmynet-token', ${JSON.stringify(token)});
+      window.location.href = '/index.html#users';
+    </script>
+    <noscript><a href="/index.html#users" style="color:#f59e0b;">Click here to access dashboard</a></noscript>
+  </div>
+</body>
+</html>`);
+  }
+
   res.json({
     message: 'Super Admin login successful.',
-    token: createToken(user),
-    user: sanitizeUser(user)
+    token,
+    user: sanitizedUser
   });
 }
 
