@@ -48,3 +48,27 @@ CREATE TABLE IF NOT EXISTS connections (
   connected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   disconnected_at TIMESTAMPTZ
 );
+
+CREATE TABLE IF NOT EXISTS openwrt_routers (
+  id TEXT PRIMARY KEY,
+  location_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  serial_number TEXT NOT NULL UNIQUE,
+  agent_token_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'offline',
+  last_seen_at TIMESTAMPTZ,
+  clients_json TEXT NOT NULL DEFAULT '[]',
+  usage_json TEXT NOT NULL DEFAULT '[]',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS openwrt_commands (
+  id TEXT PRIMARY KEY,
+  router_id TEXT NOT NULL,
+  command_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'queued',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  completed_at TIMESTAMPTZ
+);
+

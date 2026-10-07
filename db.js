@@ -156,6 +156,7 @@ async function initSqliteDb() {
     id TEXT PRIMARY KEY,
     location_id TEXT NOT NULL,
     name TEXT NOT NULL,
+    serial_number TEXT,
     agent_token_hash TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'offline',
     last_seen_at TEXT,
@@ -163,6 +164,11 @@ async function initSqliteDb() {
     usage_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL
   );`);
+  try {
+    sqliteDb.run("ALTER TABLE openwrt_routers ADD COLUMN serial_number TEXT");
+  } catch (err) {
+    // Column already exists
+  }
 
   sqliteDb.run(`CREATE TABLE IF NOT EXISTS openwrt_commands (
     id TEXT PRIMARY KEY,
@@ -351,6 +357,7 @@ async function initDb() {
         id TEXT PRIMARY KEY,
         location_id TEXT NOT NULL,
         name TEXT NOT NULL,
+        serial_number TEXT,
         agent_token_hash TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'offline',
         last_seen_at TIMESTAMPTZ,
@@ -359,6 +366,7 @@ async function initDb() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
+    await postgresPool.query("ALTER TABLE openwrt_routers ADD COLUMN IF NOT EXISTS serial_number TEXT");
 
     await postgresPool.query(`
       CREATE TABLE IF NOT EXISTS openwrt_commands (

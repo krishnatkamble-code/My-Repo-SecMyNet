@@ -283,6 +283,13 @@ function createAgentToken() {
   return randomBytes(32).toString('base64url');
 }
 
+function generateSerialNumber() {
+  const digits = Array.from({ length: 6 }, () => Math.floor(Math.random() * 10)).join('');
+  const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const alphaNum = Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  return `${digits}-${alphaNum}`;
+}
+
 async function routerAgentRequired(req, res, next) {
   await ensureDb();
   const token = req.headers['x-secmynet-agent-token'];
@@ -960,27 +967,68 @@ app.get('/api/openwrt/routers', authRequired, adminRequired, async (_req, res) =
     FROM openwrt_routers r JOIN locations l ON l.id = r.location_id
     ORDER BY r.created_at DESC
   `);
-  res.json({ routers: routers.map((router) => ({
-    ...router,
-    clients: parseJson(router.clients_json, []),
-    usage: parseJson(router.usage_json, [])
-  })) });
+  const updatedRouters = [];
+  for (const router of routers) {
+    let sn = router.serial_number;
+    if (!sn) {
+      sn = generateSerialNumber();
+      try {
+        await run('UPDATE openwrt_routers SET serial_number = $1 WHERE id = $2', [sn, router.id]);
+      } catch (_) {}
+      router.serial_number = sn;
+    }
+    updatedRouters.push({
+      ...router,
+      serialNumber: sn,
+      clients: parseJson(router.clients_json, []),
+      usage: parseJson(router.usage_json, [])
+    });
+  }
+  res.json({ routers: updatedRouters });
 });
 
 app.post('/api/openwrt/routers', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
-  const { locationId, name } = req.body;
+  const { locationId, name, serialNumber } = req.body;
   if (!locationId || !name) return res.status(400).json({ message: 'locationId and name are required.' });
   const location = await get('SELECT * FROM locations WHERE id = $1', [locationId]);
   if (!location) return res.status(404).json({ message: 'Location not found.' });
+  
+  const sn = (serialNumber && String(serialNumber).trim()) ? String(serialNumber).trim() : generateSerialNumber();
   const agentToken = createAgentToken();
   const routerId = makeId('openwrt-router');
   await run(
-    `INSERT INTO openwrt_routers (id, location_id, name, agent_token_hash, status, clients_json, usage_json, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
-    [routerId, locationId, name, hashAgentToken(agentToken), 'offline', '[]', '[]']
+    `INSERT INTO openwrt_routers (id, location_id, name, serial_number, agent_token_hash, status, clients_json, usage_json, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+    [routerId, locationId, name, sn, hashAgentToken(agentToken), 'offline', '[]', '[]']
   );
-  res.status(201).json({ message: 'OpenWrt router registered. Save the token now; it is shown only once.', routerId, agentToken });
+  res.status(201).json({ message: 'OpenWrt router registered. Save the token now; it is shown only once.', routerId, serialNumber: sn, agentToken });
+});
+
+app.patch('/api/openwrt/routers/:routerId', authRequired, adminRequired, async (req, res) => {
+  await ensureDb();
+  const { locationId, name, serialNumber } = req.body;
+  const router = await get('SELECT * FROM openwrt_routers WHERE id = $1', [req.params.routerId]);
+  if (!router) return res.status(404).json({ message: 'OpenWrt router not found.' });
+  if (!locationId || !name) return res.status(400).json({ message: 'locationId and name are required.' });
+
+  const sn = (serialNumber && String(serialNumber).trim()) ? String(serialNumber).trim() : (router.serial_number || generateSerialNumber());
+  await run(
+    'UPDATE openwrt_routers SET location_id = $1, name = $2, serial_number = $3 WHERE id = $4',
+    [locationId, name, sn, router.id]
+  );
+  const updated = await get('SELECT r.*, l.name AS location_name FROM openwrt_routers r JOIN locations l ON l.id = r.location_id WHERE r.id = $1', [router.id]);
+  res.json({ message: 'Router updated.', router: { ...updated, serialNumber: updated.serial_number, clients: parseJson(updated.clients_json, []), usage: parseJson(updated.usage_json, []) } });
+});
+
+app.delete('/api/openwrt/routers/:routerId', authRequired, adminRequired, async (req, res) => {
+  await ensureDb();
+  const router = await get('SELECT * FROM openwrt_routers WHERE id = $1', [req.params.routerId]);
+  if (!router) return res.status(404).json({ message: 'Router not found.' });
+  await run('DELETE FROM openwrt_commands WHERE router_id = $1', [router.id]);
+  await run('UPDATE devices SET router_id = NULL WHERE router_id = $1', [router.id]);
+  await run('DELETE FROM openwrt_routers WHERE id = $1', [router.id]);
+  res.json({ message: 'Router deleted.' });
 });
 
 app.post('/api/openwrt/routers/:routerId/commands', authRequired, adminRequired, async (req, res) => {

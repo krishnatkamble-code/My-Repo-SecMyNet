@@ -97,7 +97,7 @@ post_telemetry() {
   fi
 
   clients=$(collect_clients 2>/dev/null)
-  totals=$(jq -n '{rx_bytes: (reduce .[] as $c (0; . + ($c.rx_bytes // 0)), tx_bytes: (reduce .[] as $c (0; . + ($c.tx_bytes // 0)))}' <<< "$clients")
+  totals=$(echo "$clients" | jq '{rx_bytes: (reduce .[] as $c (0; . + ($c.rx_bytes // 0))), tx_bytes: (reduce .[] as $c (0; . + ($c.tx_bytes // 0)))}')
   payload=$(jq -n --argjson clients "$clients" --argjson totals "$totals" --arg ts "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" '{interfaces: [], clients: $clients, totals: $totals, timestamp: $ts}')
 
   res=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST "$SERVER_URL/api/openwrt/routers/$ROUTER_ID/telemetry" -H "Content-Type: application/json" -H "x-secmynet-agent-token: $token" -d "$payload" --max-time 15)
