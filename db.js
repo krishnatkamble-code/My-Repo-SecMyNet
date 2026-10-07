@@ -124,6 +124,11 @@ async function initSqliteDb() {
   } catch (error) {
     // Existing databases already have this column after the migration.
   }
+  try {
+    sqliteDb.run("ALTER TABLE devices ADD COLUMN serial_number TEXT");
+  } catch (error) {
+    // Existing databases already have this column.
+  }
 
   sqliteDb.run(`CREATE TABLE IF NOT EXISTS connections (
     id TEXT PRIMARY KEY,
@@ -322,6 +327,7 @@ async function initDb() {
     `);
     await postgresPool.query("ALTER TABLE devices ADD COLUMN IF NOT EXISTS ip_address TEXT NOT NULL DEFAULT ''");
     await postgresPool.query("ALTER TABLE devices ADD COLUMN IF NOT EXISTS router_id TEXT");
+    await postgresPool.query("ALTER TABLE devices ADD COLUMN IF NOT EXISTS serial_number TEXT");
 
     await postgresPool.query(`
       CREATE TABLE IF NOT EXISTS connections (

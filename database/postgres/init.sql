@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS devices (
   location_id TEXT NOT NULL,
   name TEXT NOT NULL,
   wifi_name TEXT NOT NULL,
+  serial_number TEXT,
   ip_address TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'allowed',
   allowed_user_ids TEXT NOT NULL DEFAULT '[]',

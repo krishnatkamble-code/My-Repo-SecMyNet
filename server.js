@@ -636,8 +636,15 @@ app.get('/api/dashboard', authRequired, adminRequired, async (req, res) => {
         .filter((user) => allowedUserIds.includes(user.id))
         .map(sanitizeUser);
 
+      let sn = device.serial_number;
+      if (!sn) {
+        sn = generateSerialNumber();
+        try { await run('UPDATE devices SET serial_number = $1 WHERE id = $2', [sn, device.id]); } catch (_) {}
+        device.serial_number = sn;
+      }
       return {
         ...device,
+        serialNumber: sn,
         allowedUserIds,
         location,
         allowedUsers
@@ -1153,7 +1160,7 @@ app.delete('/api/locations/:locationId', authRequired, adminRequired, async (req
 
 app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
-  const { locationId, routerId, name, wifiName, ipAddress, status } = req.body;
+  const { locationId, routerId, name, wifiName, ipAddress, serialNumber, status } = req.body;
 
   if (!locationId || !name || !wifiName || !ipAddress) {
     return res.status(400).json({ message: 'locationId, name, wifiName, and ipAddress are required.' });
@@ -1169,11 +1176,12 @@ app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
     if (!router) return res.status(404).json({ message: 'OpenWrt router not found.' });
   }
 
+  const sn = (serialNumber && String(serialNumber).trim()) ? String(serialNumber).trim() : generateSerialNumber();
   const deviceId = makeId('device');
   await run(
-    `INSERT INTO devices (id, location_id, router_id, name, wifi_name, ip_address, status, allowed_user_ids, created_by, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
-    [deviceId, locationId, routerId || null, name, wifiName, ipAddress, status || 'allowed', '[]', req.user.id]
+    `INSERT INTO devices (id, location_id, router_id, name, wifi_name, serial_number, ip_address, status, allowed_user_ids, created_by, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
+    [deviceId, locationId, routerId || null, name, wifiName, sn, ipAddress, status || 'allowed', '[]', req.user.id]
   );
 
   const device = await get('SELECT * FROM devices WHERE id = $1', [deviceId]);
@@ -1190,7 +1198,7 @@ app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
 
 app.patch('/api/devices/:deviceId', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
-  const { locationId, routerId, name, wifiName, ipAddress, status } = req.body;
+  const { locationId, routerId, name, wifiName, ipAddress, serialNumber, status } = req.body;
   const device = await get('SELECT * FROM devices WHERE id = $1', [req.params.deviceId]);
 
   if (!device) {
@@ -1210,9 +1218,10 @@ app.patch('/api/devices/:deviceId', authRequired, adminRequired, async (req, res
     if (!router) return res.status(404).json({ message: 'OpenWrt router not found.' });
   }
 
+  const sn = (serialNumber && String(serialNumber).trim()) ? String(serialNumber).trim() : (device.serial_number || generateSerialNumber());
   await run(
-    'UPDATE devices SET location_id = $1, router_id = $2, name = $3, wifi_name = $4, ip_address = $5, status = $6 WHERE id = $7',
-    [locationId, routerId || null, name, wifiName, ipAddress, status || device.status || 'allowed', device.id]
+    'UPDATE devices SET location_id = $1, router_id = $2, name = $3, wifi_name = $4, serial_number = $5, ip_address = $6, status = $7 WHERE id = $8',
+    [locationId, routerId || null, name, wifiName, sn, ipAddress, status || device.status || 'allowed', device.id]
   );
   const updatedDevice = await get('SELECT * FROM devices WHERE id = $1', [device.id]);
   const location = await get('SELECT * FROM locations WHERE id = $1', [updatedDevice.location_id]);
