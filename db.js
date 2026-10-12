@@ -346,7 +346,18 @@ async function initDb() {
     };
 
     postgresPool = new Pool(poolOptions);
-    await postgresPool.query(`
+    const safePgQuery = async (sql) => {
+      try {
+        await postgresPool.query(sql);
+      } catch (err) {
+        if (err.code === '23505' || /unique constraint/i.test(err.message)) {
+          return;
+        }
+        throw err;
+      }
+    };
+
+    await safePgQuery(`
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -356,10 +367,10 @@ async function initDb() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
-    await postgresPool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS access_status TEXT NOT NULL DEFAULT 'enabled'");
-    await postgresPool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile_number TEXT");
+    await safePgQuery("ALTER TABLE users ADD COLUMN IF NOT EXISTS access_status TEXT NOT NULL DEFAULT 'enabled'");
+    await safePgQuery("ALTER TABLE users ADD COLUMN IF NOT EXISTS mobile_number TEXT");
 
-    await postgresPool.query(`
+    await safePgQuery(`
       CREATE TABLE IF NOT EXISTS locations (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -369,7 +380,7 @@ async function initDb() {
       );
     `);
 
-    await postgresPool.query(`
+    await safePgQuery(`
       CREATE TABLE IF NOT EXISTS devices (
         id TEXT PRIMARY KEY,
         location_id TEXT NOT NULL,
@@ -382,11 +393,11 @@ async function initDb() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
-    await postgresPool.query("ALTER TABLE devices ADD COLUMN IF NOT EXISTS ip_address TEXT NOT NULL DEFAULT ''");
-    await postgresPool.query("ALTER TABLE devices ADD COLUMN IF NOT EXISTS router_id TEXT");
-    await postgresPool.query("ALTER TABLE devices ADD COLUMN IF NOT EXISTS serial_number TEXT");
+    await safePgQuery("ALTER TABLE devices ADD COLUMN IF NOT EXISTS ip_address TEXT NOT NULL DEFAULT ''");
+    await safePgQuery("ALTER TABLE devices ADD COLUMN IF NOT EXISTS router_id TEXT");
+    await safePgQuery("ALTER TABLE devices ADD COLUMN IF NOT EXISTS serial_number TEXT");
 
-    await postgresPool.query(`
+    await safePgQuery(`
       CREATE TABLE IF NOT EXISTS connections (
         id TEXT PRIMARY KEY,
         device_id TEXT NOT NULL,
@@ -398,7 +409,7 @@ async function initDb() {
       );
     `);
 
-    await postgresPool.query(`
+    await safePgQuery(`
       CREATE TABLE IF NOT EXISTS notifications (
         id TEXT PRIMARY KEY,
         type TEXT NOT NULL,
@@ -413,9 +424,9 @@ async function initDb() {
     `);
 
     // Ensure expires_at exists for older DBs
-    await postgresPool.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ");
+    await safePgQuery("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ");
 
-    await postgresPool.query(`
+    await safePgQuery(`
       CREATE TABLE IF NOT EXISTS openwrt_routers (
         id TEXT PRIMARY KEY,
         location_id TEXT NOT NULL,
@@ -429,9 +440,9 @@ async function initDb() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
-    await postgresPool.query("ALTER TABLE openwrt_routers ADD COLUMN IF NOT EXISTS serial_number TEXT");
+    await safePgQuery("ALTER TABLE openwrt_routers ADD COLUMN IF NOT EXISTS serial_number TEXT");
 
-    await postgresPool.query(`
+    await safePgQuery(`
       CREATE TABLE IF NOT EXISTS openwrt_commands (
         id TEXT PRIMARY KEY,
         router_id TEXT NOT NULL,
@@ -443,7 +454,7 @@ async function initDb() {
       );
     `);
 
-    await postgresPool.query(`
+    await safePgQuery(`
       CREATE TABLE IF NOT EXISTS usage_records (
         id TEXT PRIMARY KEY,
         router_id TEXT NOT NULL,
@@ -458,7 +469,7 @@ async function initDb() {
       );
     `);
 
-    await postgresPool.query(`
+    await safePgQuery(`
       CREATE TABLE IF NOT EXISTS push_tokens (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -470,7 +481,7 @@ async function initDb() {
       );
     `);
 
-    await postgresPool.query(`
+    await safePgQuery(`
       CREATE TABLE IF NOT EXISTS admin_contacts (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -479,7 +490,7 @@ async function initDb() {
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
-    await postgresPool.query(`
+    await safePgQuery(`
       CREATE TABLE IF NOT EXISTS password_reset_tokens (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
