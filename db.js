@@ -6,20 +6,27 @@ const initSqlJs = require('sql.js');
 const { Pool } = require('pg');
 
 function resolveDatabaseUrl() {
-  const existingDatabaseUrl = process.env.DATABASE_URL || '';
+  const existingDatabaseUrl =
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    process.env.POSTGRES_PRISMA_URL ||
+    process.env.POSTGRES_URL_NON_POOLING ||
+    process.env.NEON_DATABASE_URL ||
+    process.env.VERCEL_POSTGRES_URL ||
+    '';
   if (existingDatabaseUrl) {
     return existingDatabaseUrl;
   }
 
-  const azureHost = process.env.AZURE_POSTGRES_HOST || process.env.PGHOST;
-  const azurePort = process.env.AZURE_POSTGRES_PORT || process.env.PGPORT || '5432';
-  const azureDatabase = process.env.AZURE_POSTGRES_DB || process.env.PGDATABASE || 'secmynet';
-  const azureUser = process.env.AZURE_POSTGRES_USER || process.env.PGUSER || 'secmynet';
-  const azurePassword = process.env.AZURE_POSTGRES_PASSWORD || process.env.PGPASSWORD || '';
-  const azureSslMode = process.env.AZURE_POSTGRES_SSLMODE || process.env.PGSSLMODE || 'require';
+  const host = process.env.POSTGRES_HOST || process.env.AZURE_POSTGRES_HOST || process.env.PGHOST;
+  const port = process.env.POSTGRES_PORT || process.env.AZURE_POSTGRES_PORT || process.env.PGPORT || '5432';
+  const database = process.env.POSTGRES_DATABASE || process.env.AZURE_POSTGRES_DB || process.env.PGDATABASE || 'secmynet';
+  const user = process.env.POSTGRES_USER || process.env.AZURE_POSTGRES_USER || process.env.PGUSER || 'secmynet';
+  const password = process.env.POSTGRES_PASSWORD || process.env.AZURE_POSTGRES_PASSWORD || process.env.PGPASSWORD || '';
+  const sslMode = process.env.POSTGRES_SSLMODE || process.env.AZURE_POSTGRES_SSLMODE || process.env.PGSSLMODE || 'require';
 
-  if (azureHost && azureUser) {
-    return `postgresql://${encodeURIComponent(azureUser)}:${encodeURIComponent(azurePassword)}@${azureHost}:${azurePort}/${azureDatabase}?sslmode=${azureSslMode}`;
+  if (host && user) {
+    return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}?sslmode=${sslMode}`;
   }
 
   return '';
@@ -281,11 +288,15 @@ async function initDb() {
   }
 
   if (isPostgresConfigured) {
+    const isSslNeeded =
+      process.env.PGSSLMODE === 'require' ||
+      process.env.PGSSL === 'true' ||
+      /sslmode=require/i.test(DATABASE_URL) ||
+      /neon\.tech/i.test(DATABASE_URL);
+
     const poolOptions = {
       connectionString: DATABASE_URL,
-      ssl: process.env.PGSSLMODE === 'require' || process.env.PGSSL === 'true'
-        ? { rejectUnauthorized: false }
-        : undefined
+      ssl: isSslNeeded ? { rejectUnauthorized: false } : undefined
     };
 
     postgresPool = new Pool(poolOptions);

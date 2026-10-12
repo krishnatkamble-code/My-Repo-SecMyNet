@@ -454,13 +454,21 @@ const quarantineReconciliationTimer = setInterval(() => {
 quarantineReconciliationTimer.unref();
 
 app.get('/api/health', async (_req, res) => {
-  await ensureDb();
+  let dbStatus = 'ok';
+  let dbError = null;
+  try {
+    await ensureDb();
+  } catch (err) {
+    dbStatus = 'error';
+    dbError = err.message;
+  }
   res.json({
-    status: 'ok',
+    status: dbStatus,
     message: 'SecMyNet portal API is running',
     environment: isVercel ? 'vercel' : 'standard',
     database: isPostgresConfigured ? 'postgres' : 'sqlite',
-    persistentStorage: isPostgresConfigured
+    persistentStorage: isPostgresConfigured,
+    dbError
   });
 });
 
