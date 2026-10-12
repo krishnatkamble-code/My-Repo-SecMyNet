@@ -468,6 +468,7 @@ app.get('/api/health', async (_req, res) => {
     environment: isVercel ? 'vercel' : 'standard',
     database: isPostgresConfigured ? 'postgres' : 'sqlite',
     persistentStorage: isPostgresConfigured,
+    dbEnvKeys: Object.keys(process.env).filter(k => /POSTGRES|DATABASE|NEON|PG|SQL/i.test(k)),
     dbError
   });
 });
