@@ -1011,7 +1011,7 @@ app.get('/api/openwrt/routers', authRequired, adminRequired, async (_req, res) =
   await ensureDb();
   const routers = await all(`
     SELECT r.*, l.name AS location_name
-    FROM openwrt_routers r JOIN locations l ON l.id = r.location_id
+    FROM openwrt_routers r LEFT JOIN locations l ON l.id = r.location_id
     ORDER BY r.created_at DESC
   `);
   const updatedRouters = [];
@@ -1048,19 +1048,41 @@ app.get('/api/openwrt/routers', authRequired, adminRequired, async (_req, res) =
 app.post('/api/openwrt/routers', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
   const { locationId, name, serialNumber } = req.body;
-  if (!locationId || !name) return res.status(400).json({ message: 'locationId and name are required.' });
-  const location = await get('SELECT * FROM locations WHERE id = $1', [locationId]);
-  if (!location) return res.status(404).json({ message: 'Location not found.' });
-  
+  if (!name || !String(name).trim()) return res.status(400).json({ message: 'Router name is required.' });
+
+  let effectiveLocationId = locationId;
+  if (!effectiveLocationId) {
+    let loc = await get('SELECT id FROM locations LIMIT 1');
+    if (!loc) {
+      const newLocId = makeId('location');
+      await run('INSERT INTO locations (id, name, city, admin_id, created_at) VALUES ($1, $2, $3, $4, NOW())', [newLocId, 'Main Location', 'HQ', req.user.id]);
+      effectiveLocationId = newLocId;
+    } else {
+      effectiveLocationId = loc.id;
+    }
+  }
+
   const sn = (serialNumber && String(serialNumber).trim()) ? String(serialNumber).trim() : generateSerialNumber();
   const agentToken = createAgentToken();
   const routerId = await getUniqueRouterId();
   await run(
     `INSERT INTO openwrt_routers (id, location_id, name, serial_number, agent_token_hash, status, clients_json, usage_json, created_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
-    [routerId, locationId, name, sn, hashAgentToken(agentToken), 'offline', '[]', '[]']
+    [routerId, effectiveLocationId, String(name).trim(), sn, hashAgentToken(agentToken), 'offline', '[]', '[]']
   );
-  res.status(201).json({ message: 'OpenWrt router registered. Save the token now; it is shown only once.', routerId, serialNumber: sn, agentToken });
+
+  // Also sync or create corresponding device in devices table
+  const existingDev = await get('SELECT id FROM devices WHERE router_id = $1', [routerId]);
+  if (!existingDev) {
+    const devId = makeId('device');
+    await run(
+      `INSERT INTO devices (id, location_id, router_id, name, wifi_name, serial_number, ip_address, status, allowed_user_ids, created_by, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
+      [devId, effectiveLocationId, routerId, String(name).trim(), `${String(name).trim()} WiFi`, sn, '192.168.1.1', 'allowed', '[]', req.user.id]
+    );
+  }
+
+  res.status(201).json({ message: 'Router registered successfully. Save the token now; it is shown only once.', routerId, serialNumber: sn, agentToken });
 });
 
 app.patch('/api/openwrt/routers/:routerId', authRequired, adminRequired, async (req, res) => {
@@ -1068,14 +1090,19 @@ app.patch('/api/openwrt/routers/:routerId', authRequired, adminRequired, async (
   const { locationId, name, serialNumber } = req.body;
   const router = await get('SELECT * FROM openwrt_routers WHERE id = $1', [req.params.routerId]);
   if (!router) return res.status(404).json({ message: 'OpenWrt router not found.' });
-  if (!locationId || !name) return res.status(400).json({ message: 'locationId and name are required.' });
+  if (!name || !String(name).trim()) return res.status(400).json({ message: 'Router name is required.' });
 
+  const effectiveLocationId = locationId || router.location_id;
   const sn = (serialNumber && String(serialNumber).trim()) ? String(serialNumber).trim() : (router.serial_number || generateSerialNumber());
   await run(
     'UPDATE openwrt_routers SET location_id = $1, name = $2, serial_number = $3 WHERE id = $4',
-    [locationId, name, sn, router.id]
+    [effectiveLocationId, String(name).trim(), sn, router.id]
   );
-  const updated = await get('SELECT r.*, l.name AS location_name FROM openwrt_routers r JOIN locations l ON l.id = r.location_id WHERE r.id = $1', [router.id]);
+  await run(
+    'UPDATE devices SET location_id = $1, name = $2, serial_number = $3 WHERE router_id = $4',
+    [effectiveLocationId, String(name).trim(), sn, router.id]
+  );
+  const updated = await get('SELECT r.*, l.name AS location_name FROM openwrt_routers r LEFT JOIN locations l ON l.id = r.location_id WHERE r.id = $1', [router.id]);
   res.json({ message: 'Router updated.', router: { ...updated, serialNumber: updated.serial_number, clients: parseJson(updated.clients_json, []), usage: parseJson(updated.usage_json, []) } });
 });
 
