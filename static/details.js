@@ -33,12 +33,13 @@ function renderLocations(locations) {
 
 function renderDevices(devices) {
   if (!devices.length) {
-    table.innerHTML = '<tr><td colspan="6">No devices have been added yet.</td></tr>';
+    table.innerHTML = '<tr><td colspan="7">No devices have been added yet.</td></tr>';
     return;
   }
   table.innerHTML = devices.map((device) => `
     <tr>
       <td>${escapeHtml(device.name)}</td>
+      <td><code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(device.router_id || device.routerId || 'N/A')}</code></td>
       <td>${escapeHtml(device.wifi_name || device.wifiName || '—')}</td>
       <td>${escapeHtml(device.location?.name || 'Unknown location')}</td>
       <td><span class="status-badge ${escapeHtml(device.status || 'unknown')}">${escapeHtml(device.status || 'Unknown')}</span></td>

@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS locations (
 CREATE TABLE IF NOT EXISTS devices (
   id TEXT PRIMARY KEY,
   location_id TEXT NOT NULL,
+  router_id TEXT,
   name TEXT NOT NULL,
   wifi_name TEXT NOT NULL,
   serial_number TEXT,

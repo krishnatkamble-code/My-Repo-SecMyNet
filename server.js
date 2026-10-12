@@ -290,6 +290,20 @@ function generateSerialNumber() {
   return `${digits}-${alphaNum}`;
 }
 
+function generateRouterId() {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+async function getUniqueRouterId() {
+  for (let i = 0; i < 50; i++) {
+    const id = generateRouterId();
+    const existingRouter = await get('SELECT id FROM openwrt_routers WHERE id = $1', [id]);
+    const existingDev = await get('SELECT id FROM devices WHERE router_id = $1', [id]);
+    if (!existingRouter && !existingDev) return id;
+  }
+  return generateRouterId();
+}
+
 async function routerAgentRequired(req, res, next) {
   await ensureDb();
   const token = req.headers['x-secmynet-agent-token'];
@@ -642,8 +656,34 @@ app.get('/api/dashboard', authRequired, adminRequired, async (req, res) => {
         try { await run('UPDATE devices SET serial_number = $1 WHERE id = $2', [sn, device.id]); } catch (_) {}
         device.serial_number = sn;
       }
+      let rId = device.router_id;
+      if (!rId || !/^\d{6}$/.test(rId)) {
+        const oldId = rId;
+        rId = await getUniqueRouterId();
+        try {
+          await run('UPDATE devices SET router_id = $1 WHERE id = $2', [rId, device.id]);
+          if (oldId) {
+            await run('UPDATE openwrt_routers SET id = $1 WHERE id = $2', [rId, oldId]);
+            await run('UPDATE openwrt_commands SET router_id = $1 WHERE router_id = $2', [rId, oldId]);
+            await run('UPDATE usage_records SET router_id = $1 WHERE router_id = $2', [rId, oldId]);
+          } else {
+            const existingRouter = await get('SELECT id FROM openwrt_routers WHERE id = $1', [rId]);
+            if (!existingRouter) {
+              const agentToken = createAgentToken();
+              await run(
+                `INSERT INTO openwrt_routers (id, location_id, name, serial_number, agent_token_hash, status, clients_json, usage_json, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+                [rId, device.location_id, device.name, sn, hashAgentToken(agentToken), 'offline', '[]', '[]']
+              );
+            }
+          }
+        } catch (_) {}
+        device.router_id = rId;
+      }
       return {
         ...device,
+        router_id: rId,
+        routerId: rId,
         serialNumber: sn,
         allowedUserIds,
         location,
@@ -976,6 +1016,17 @@ app.get('/api/openwrt/routers', authRequired, adminRequired, async (_req, res) =
   `);
   const updatedRouters = [];
   for (const router of routers) {
+    if (!/^\d{6}$/.test(router.id)) {
+      const oldId = router.id;
+      const newId = await getUniqueRouterId();
+      try {
+        await run('UPDATE openwrt_routers SET id = $1 WHERE id = $2', [newId, oldId]);
+        await run('UPDATE devices SET router_id = $1 WHERE router_id = $2', [newId, oldId]);
+        await run('UPDATE openwrt_commands SET router_id = $1 WHERE router_id = $2', [newId, oldId]);
+        await run('UPDATE usage_records SET router_id = $1 WHERE router_id = $2', [newId, oldId]);
+        router.id = newId;
+      } catch (_) {}
+    }
     let sn = router.serial_number;
     if (!sn) {
       sn = generateSerialNumber();
@@ -1003,7 +1054,7 @@ app.post('/api/openwrt/routers', authRequired, adminRequired, async (req, res) =
   
   const sn = (serialNumber && String(serialNumber).trim()) ? String(serialNumber).trim() : generateSerialNumber();
   const agentToken = createAgentToken();
-  const routerId = makeId('openwrt-router');
+  const routerId = await getUniqueRouterId();
   await run(
     `INSERT INTO openwrt_routers (id, location_id, name, serial_number, agent_token_hash, status, clients_json, usage_json, created_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
@@ -1171,9 +1222,21 @@ app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
     return res.status(400).json({ message: 'Enter a valid IPv4 address, for example 192.168.255.254.' });
   }
 
-  if (routerId) {
-    const router = await get('SELECT id FROM openwrt_routers WHERE id = $1', [routerId]);
+  let finalRouterId = (routerId && String(routerId).trim()) ? String(routerId).trim() : null;
+  let agentToken = null;
+
+  if (finalRouterId) {
+    const router = await get('SELECT id FROM openwrt_routers WHERE id = $1', [finalRouterId]);
     if (!router) return res.status(404).json({ message: 'OpenWrt router not found.' });
+  } else {
+    finalRouterId = await getUniqueRouterId();
+    agentToken = createAgentToken();
+    const snForRouter = (serialNumber && String(serialNumber).trim()) ? String(serialNumber).trim() : generateSerialNumber();
+    await run(
+      `INSERT INTO openwrt_routers (id, location_id, name, serial_number, agent_token_hash, status, clients_json, usage_json, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+      [finalRouterId, locationId, name, snForRouter, hashAgentToken(agentToken), 'offline', '[]', '[]']
+    );
   }
 
   const sn = (serialNumber && String(serialNumber).trim()) ? String(serialNumber).trim() : generateSerialNumber();
@@ -1181,19 +1244,26 @@ app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
   await run(
     `INSERT INTO devices (id, location_id, router_id, name, wifi_name, serial_number, ip_address, status, allowed_user_ids, created_by, created_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
-    [deviceId, locationId, routerId || null, name, wifiName, sn, ipAddress, status || 'allowed', '[]', req.user.id]
+    [deviceId, locationId, finalRouterId, name, wifiName, sn, ipAddress, status || 'allowed', '[]', req.user.id]
   );
 
   const device = await get('SELECT * FROM devices WHERE id = $1', [deviceId]);
   const location = await get('SELECT * FROM locations WHERE id = $1', [device.location_id]);
   const payload = {
     ...device,
+    routerId: device.router_id,
+    serialNumber: device.serial_number,
     location,
     allowedUserIds: parseAllowedUsers(device.allowed_user_ids),
     allowedUsers: []
   };
 
-  res.status(201).json({ message: 'Device added.', device: payload });
+  res.status(201).json({
+    message: 'Device added.',
+    device: payload,
+    routerId: finalRouterId,
+    agentToken
+  });
 });
 
 app.patch('/api/devices/:deviceId', authRequired, adminRequired, async (req, res) => {
@@ -1213,19 +1283,24 @@ app.patch('/api/devices/:deviceId', authRequired, adminRequired, async (req, res
     return res.status(400).json({ message: 'Enter a valid IPv4 address, for example 192.168.255.254.' });
   }
 
-  if (routerId) {
-    const router = await get('SELECT id FROM openwrt_routers WHERE id = $1', [routerId]);
+  let finalRouterId = (routerId !== undefined && routerId !== '') ? String(routerId).trim() : device.router_id;
+  if (!finalRouterId || !/^\d{6}$/.test(finalRouterId)) {
+    finalRouterId = await getUniqueRouterId();
+  }
+
+  if (finalRouterId && finalRouterId !== device.router_id) {
+    const router = await get('SELECT id FROM openwrt_routers WHERE id = $1', [finalRouterId]);
     if (!router) return res.status(404).json({ message: 'OpenWrt router not found.' });
   }
 
   const sn = (serialNumber && String(serialNumber).trim()) ? String(serialNumber).trim() : (device.serial_number || generateSerialNumber());
   await run(
     'UPDATE devices SET location_id = $1, router_id = $2, name = $3, wifi_name = $4, serial_number = $5, ip_address = $6, status = $7 WHERE id = $8',
-    [locationId, routerId || null, name, wifiName, sn, ipAddress, status || device.status || 'allowed', device.id]
+    [locationId, finalRouterId, name, wifiName, sn, ipAddress, status || device.status || 'allowed', device.id]
   );
   const updatedDevice = await get('SELECT * FROM devices WHERE id = $1', [device.id]);
   const location = await get('SELECT * FROM locations WHERE id = $1', [updatedDevice.location_id]);
-  res.json({ message: 'Device updated.', device: { ...updatedDevice, location, allowedUserIds: parseAllowedUsers(updatedDevice.allowed_user_ids) } });
+  res.json({ message: 'Device updated.', device: { ...updatedDevice, routerId: updatedDevice.router_id, serialNumber: updatedDevice.serial_number, location, allowedUserIds: parseAllowedUsers(updatedDevice.allowed_user_ids) } });
 });
 
 app.delete('/api/devices/:deviceId', authRequired, adminRequired, async (req, res) => {
