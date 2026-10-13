@@ -220,6 +220,7 @@ function sanitizeUser(user) {
     id: user.id,
     name: user.name,
     email: user.email,
+    mobileNumber: user.mobile_number || user.mobileNumber || '',
     role: user.role,
     accessStatus: user.access_status || 'enabled',
     createdAt: user.created_at || user.createdAt
@@ -309,6 +310,7 @@ async function routerAgentRequired(req, res, next) {
   const token = req.headers['x-secmynet-agent-token'];
   const router = await get('SELECT * FROM openwrt_routers WHERE id = $1', [req.params.routerId]);
   if (!router || !token || hashAgentToken(token) !== router.agent_token_hash) {
+    console.warn(`[Agent Auth Failed] Router ID: ${req.params.routerId}, Has Token: ${Boolean(token)}, Sent Token: "${token || ''}", Sent Hash: ${token ? hashAgentToken(token) : 'none'}, Expected Hash: ${router?.agent_token_hash || 'not found'}`);
     return res.status(401).json({ message: 'Invalid OpenWrt agent credentials.' });
   }
   req.router = router;
@@ -378,6 +380,21 @@ async function processTelemetry(routerId, clients = [], usage = []) {
     const now = new Date().toISOString();
     const clientList = Array.isArray(clients) ? clients : [];
 
+    // Find linked device for this router
+    let device = await get('SELECT * FROM devices WHERE router_id = $1 LIMIT 1', [routerId]);
+    const router = await get('SELECT * FROM openwrt_routers WHERE id = $1 LIMIT 1', [routerId]);
+    if (!device && router) {
+      const devId = makeId('device');
+      await run(
+        `INSERT INTO devices (id, location_id, router_id, name, wifi_name, serial_number, ip_address, status, allowed_user_ids, created_by, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, '192.168.1.1', 'allowed', '[]', 'system', NOW())`,
+        [devId, router.location_id, router.id, router.name, `${router.name} WiFi`, router.serial_number || '']
+      );
+      device = await get('SELECT * FROM devices WHERE id = $1', [devId]);
+    }
+
+    const activeUserIds = [];
+
     for (const client of clientList) {
       const mac = (client.mac || client.MAC || '').toLowerCase();
       if (!mac) continue;
@@ -385,6 +402,7 @@ async function processTelemetry(routerId, clients = [], usage = []) {
       const hostname = client.hostname || client.host || null;
       const rx = Number(client.rx_bytes || client.rx || 0);
       const tx = Number(client.tx_bytes || client.tx || 0);
+      const totalMb = Number(((rx + tx) / (1024 * 1024)).toFixed(2));
 
       // Get most recent usage record for this client on this router
       const prev = await get(
@@ -413,6 +431,72 @@ async function processTelemetry(routerId, clients = [], usage = []) {
         deltaTx: delta_tx,
         timestamp: now
       });
+
+      // Synchronize real-time client with users & connections table
+      if (device) {
+        const userId = 'user-mac-' + mac.replace(/[^a-z0-9]/g, '');
+        activeUserIds.push(userId);
+        const clientEmail = mac;
+        const displayName = hostname && hostname !== '?' ? hostname : `Client (${mac.toUpperCase()})`;
+
+        let user = await get('SELECT * FROM users WHERE id = $1', [userId]);
+        if (!user) {
+          const existingEmail = await get('SELECT id FROM users WHERE email = $1', [clientEmail]);
+          if (!existingEmail) {
+            await run(
+              `INSERT INTO users (id, name, email, password_hash, role, access_status, mobile_number, created_at)
+               VALUES ($1, $2, $3, 'none', 'user', 'enabled', $4, NOW())`,
+              [userId, displayName, clientEmail, ip || '']
+            );
+          }
+        } else {
+          if (displayName && user.name !== displayName) {
+            await run('UPDATE users SET name = $1 WHERE id = $2', [displayName, userId]);
+          }
+          if (ip && user.mobile_number !== ip) {
+            await run('UPDATE users SET mobile_number = $1 WHERE id = $2', [ip, userId]);
+          }
+        }
+
+        // Ensure user is in device's allowed_user_ids
+        const allowed = parseAllowedUsers(device.allowed_user_ids);
+        if (!allowed.includes(userId)) {
+          allowed.push(userId);
+          await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(allowed), device.id]);
+        }
+
+        const activeConn = await get(
+          "SELECT * FROM connections WHERE device_id = $1 AND user_id = $2 AND status = 'connected' LIMIT 1",
+          [device.id, userId]
+        );
+
+        if (activeConn) {
+          await run(
+            'UPDATE connections SET data_used_mb = $1 WHERE id = $2',
+            [totalMb, activeConn.id]
+          );
+        } else {
+          const connId = makeId('connection');
+          await run(
+            `INSERT INTO connections (id, device_id, user_id, status, data_used_mb, connected_at)
+             VALUES ($1, $2, $3, 'connected', $4, NOW())`,
+            [connId, device.id, userId, totalMb]
+          );
+        }
+      }
+    }
+
+    // Disconnect stale router clients if no longer in station dump
+    if (device && activeUserIds.length > 0) {
+      const activeMacConns = await all(
+        "SELECT id, user_id FROM connections WHERE device_id = $1 AND status = 'connected' AND user_id LIKE 'user-mac-%'",
+        [device.id]
+      );
+      for (const conn of activeMacConns || []) {
+        if (!activeUserIds.includes(conn.user_id)) {
+          await run("UPDATE connections SET status = 'disconnected', disconnected_at = NOW() WHERE id = $1", [conn.id]);
+        }
+      }
     }
   } catch (err) {
     console.error('processTelemetry error', err);
@@ -619,7 +703,7 @@ app.get('/api/dashboard', authRequired, adminRequired, async (req, res) => {
   const locations = await all('SELECT * FROM locations ORDER BY created_at DESC');
   const devices = await all('SELECT * FROM devices ORDER BY created_at DESC');
   const connections = await all(`
-    SELECT c.*, u.name AS user_name, u.email AS user_email, d.name AS device_name
+    SELECT c.*, u.name AS user_name, u.email AS user_email, u.mobile_number AS client_ip, d.name AS device_name, d.ip_address AS device_ip
     FROM connections c
     JOIN users u ON u.id = c.user_id
     JOIN devices d ON d.id = c.device_id
@@ -706,6 +790,7 @@ app.get('/api/dashboard', authRequired, adminRequired, async (req, res) => {
     userName: connection.user_name,
     userEmail: connection.user_email,
     deviceName: connection.device_name,
+    deviceIp: connection.client_ip || connection.device_ip,
     connectedAt: connection.connected_at,
     disconnectedAt: connection.disconnected_at
   }));
@@ -901,6 +986,87 @@ app.delete('/api/users/:userId', authRequired, adminRequired, async (req, res) =
   }
   await run('DELETE FROM users WHERE id = $1', [target.id]);
   res.json({ message: `${target.role === 'admin' ? 'Admin' : 'User'} deleted.` });
+});
+
+app.get('/api/users/:userId/details', authRequired, adminRequired, async (req, res) => {
+  await ensureDb();
+  const userId = req.params.userId;
+  let user = await get('SELECT * FROM users WHERE id = $1', [userId]);
+
+  let mac = '';
+  if (user && /^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(user.email)) {
+    mac = user.email.toLowerCase();
+  } else if (userId && userId.startsWith('user-mac-')) {
+    const raw = userId.replace('user-mac-', '');
+    mac = raw.match(/.{1,2}/g)?.join(':') || '';
+  }
+
+  if (!user && mac) {
+    user = {
+      id: userId,
+      name: `Client (${mac.toUpperCase()})`,
+      email: mac,
+      role: 'user',
+      access_status: 'enabled',
+      created_at: new Date().toISOString()
+    };
+  }
+
+  if (!user) {
+    return res.status(404).json({ message: 'User not found.' });
+  }
+
+  const connections = await all(`
+    SELECT c.*, d.name AS device_name, d.ip_address AS device_ip, d.router_id, l.name AS location_name, l.city AS location_city
+    FROM connections c
+    LEFT JOIN devices d ON d.id = c.device_id
+    LEFT JOIN locations l ON l.id = d.location_id
+    WHERE c.user_id = $1
+    ORDER BY c.connected_at DESC
+  `, [userId]);
+
+  let usageRecords = [];
+  let routerInfo = null;
+  let liveTelemetryClient = null;
+
+  if (mac) {
+    usageRecords = await all(
+      'SELECT id, router_id, rx_bytes, tx_bytes, delta_rx, delta_tx, timestamp FROM usage_records WHERE LOWER(client_mac) = $1 ORDER BY timestamp DESC LIMIT 30',
+      [mac.toLowerCase()]
+    );
+
+    const routers = await all('SELECT id, name, location_id, clients_json, status, last_seen_at FROM openwrt_routers');
+    for (const r of routers) {
+      const clients = parseJson(r.clients_json, []);
+      const matched = clients.find((c) => (c.mac || '').toLowerCase() === mac.toLowerCase());
+      if (matched) {
+        liveTelemetryClient = matched;
+        const loc = await get('SELECT name, city FROM locations WHERE id = $1', [r.location_id]);
+        routerInfo = {
+          id: r.id,
+          name: r.name,
+          status: r.status,
+          last_seen_at: r.last_seen_at,
+          locationName: loc ? loc.name : null,
+          locationCity: loc ? loc.city : null
+        };
+        break;
+      }
+    }
+  }
+
+  res.json({
+    user: sanitizeUser(user),
+    mobileNumber: user.mobile_number || '',
+    mac,
+    connections: connections.map((c) => ({
+      ...c,
+      dataUsedMb: Number(c.data_used_mb || 0)
+    })),
+    liveTelemetryClient,
+    routerInfo,
+    usageRecords
+  });
 });
 
 app.get('/api/user-dashboard', authRequired, async (req, res) => {
@@ -1122,6 +1288,15 @@ app.delete('/api/openwrt/routers/:routerId', authRequired, adminRequired, async 
   await run('UPDATE devices SET router_id = NULL WHERE router_id = $1', [router.id]);
   await run('DELETE FROM openwrt_routers WHERE id = $1', [router.id]);
   res.json({ message: 'Router deleted.' });
+});
+
+app.post('/api/openwrt/routers/:routerId/reset-token', authRequired, adminRequired, async (req, res) => {
+  await ensureDb();
+  const router = await get('SELECT * FROM openwrt_routers WHERE id = $1', [req.params.routerId]);
+  if (!router) return res.status(404).json({ message: 'Router not found.' });
+  const agentToken = createAgentToken();
+  await run('UPDATE openwrt_routers SET agent_token_hash = $1 WHERE id = $2', [hashAgentToken(agentToken), router.id]);
+  res.json({ message: 'Agent token generated successfully.', routerId: router.id, agentToken });
 });
 
 app.post('/api/openwrt/routers/:routerId/commands', authRequired, adminRequired, async (req, res) => {
@@ -1395,7 +1570,21 @@ app.post('/api/devices/:deviceId/disallow-user', authRequired, adminRequired, as
   await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(allowedUsers), device.id]);
   await run(`UPDATE connections SET status = 'blocked' WHERE device_id = $1 AND user_id = $2`, [device.id, userId]);
 
-  res.json({ message: 'User removed from the allowed list.', device: { ...device, allowedUserIds: allowedUsers } });
+  if (device.router_id) {
+    let mac = '';
+    if (userId && userId.startsWith('user-mac-')) {
+      const raw = userId.replace('user-mac-', '');
+      mac = raw.match(/.{1,2}/g)?.join(':') || '';
+    }
+    const commandId = makeId('openwrt-command');
+    await run(
+      `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+       VALUES ($1, $2, 'block', $3, 'queued', NOW())`,
+      [commandId, device.router_id, JSON.stringify({ mac })]
+    );
+  }
+
+  res.json({ message: 'User removed from the allowed list and blacklisted.', device: { ...device, allowedUserIds: allowedUsers } });
 });
 
 app.post('/api/devices/:deviceId/disconnect-user', authRequired, adminRequired, async (req, res) => {
@@ -1414,6 +1603,21 @@ app.post('/api/devices/:deviceId/disconnect-user', authRequired, adminRequired, 
     'UPDATE connections SET status = $1, disconnected_at = NOW() WHERE id = $2',
     ['disconnected', connection.id]
   );
+
+  const device = await get('SELECT * FROM devices WHERE id = $1', [req.params.deviceId]);
+  if (device && device.router_id) {
+    let mac = '';
+    if (userId && userId.startsWith('user-mac-')) {
+      const raw = userId.replace('user-mac-', '');
+      mac = raw.match(/.{1,2}/g)?.join(':') || '';
+    }
+    const commandId = makeId('openwrt-command');
+    await run(
+      `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+       VALUES ($1, $2, 'disconnect', $3, 'queued', NOW())`,
+      [commandId, device.router_id, JSON.stringify({ mac })]
+    );
+  }
 
   res.json({ message: 'User disconnected from the device.', connection: { ...connection, status: 'disconnected' } });
 });

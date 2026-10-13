@@ -1,92 +1,96 @@
-#!/bin/sh
-# Simple OpenWrt agent for SecMyNet
-# - Collects station info via `iw`/`iwinfo`/`hostapd_cli` where available
-# - Posts telemetry to SecMyNet server and polls for commands
-# - Minimal, best-effort implementation intended for OpenWrt builds
+﻿#!/bin/sh
+# SecMyNet OpenWrt Agent
+# Collects station info and telemetry and posts to SecMyNet server
 
-# Configuration (can be overridden via environment)
-SERVER_URL=${SERVER_URL:-http://localhost:3000}
-ROUTER_ID=${ROUTER_ID:-}
+if [ -f /etc/secmynet-agent.conf ]; then
+  . /etc/secmynet-agent.conf
+elif [ -f /etc/secmynet-agent/agent.conf ]; then
+  . /etc/secmynet-agent/agent.conf
+fi
+
+SERVER_URL=${SERVER_URL:-${SECMYNET_URL:-http://192.168.1.144:3000}}
+SERVER_URL="$(printf '%s' "${SERVER_URL%/}" | tr -d '\r\n ')"
+ROUTER_ID=${ROUTER_ID:-${SECMYNET_ROUTER_ID:-558971}}
+ROUTER_ID="$(printf '%s' "$ROUTER_ID" | tr -d '\r\n ')"
 TOKEN_FILE=${TOKEN_FILE:-/etc/secmynet-agent/token}
 STATE_FILE=${STATE_FILE:-/var/run/secmynet-agent/state.json}
 LOG_FILE=${LOG_FILE:-/var/log/secmynet-agent.log}
-INTERVAL=${INTERVAL:-60} # seconds between telemetry posts
+INTERVAL=${INTERVAL:-30}
 
-# Helpers
 log() {
   echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') $*" >> "$LOG_FILE"
 }
 
 read_token() {
-  if [ -n "$ROUTER_ID" ] && [ -f "$TOKEN_FILE" ]; then
-    cat "$TOKEN_FILE" 2>/dev/null
+  tok=""
+  if [ -n "$TOKEN" ]; then
+    tok="$TOKEN"
+  elif [ -n "$SECMYNET_AGENT_TOKEN" ]; then
+    tok="$SECMYNET_AGENT_TOKEN"
+  elif [ -f "$TOKEN_FILE" ]; then
+    tok="$(cat "$TOKEN_FILE" 2>/dev/null)"
   else
-    echo ""
+    tok="pw9SafCxXCaLWQgIJA5NfIV2e4gORb3PWZgTV3i-ojI"
   fi
-}
-
-# Discover wireless interfaces using `iw` output
-list_wlan_ifaces() {
-  iw dev 2>/dev/null | awk '/Interface/ {print $2}'
-}
-
-# Collect clients for a single interface using `iw` station dump
-collect_clients_for_iface() {
-  iface="$1"
-  out="$(iw dev "$iface" station dump 2>/dev/null)"
-  if [ -z "$out" ]; then
-    # fallback to iwinfo assoclist which gives MAC list
-    iwinfo "$iface" assoclist 2>/dev/null | awk '{print $1}' | while read -r mac; do
-      echo "{"$"\"mac\":\"$mac\"""}
-    done
-    return
-  fi
-
-  # Parse station dump blocks
-  echo "$out" | awk -v RS="\n\n" 'NF{print $0"\n"RS}' | while IFS= read -r block; do
-    mac=""
-    rx=0
-    tx=0
-    signal=null
-    hostname=null
-    echo "$block" | while IFS= read -r line; do
-      case "$line" in
-        Station*)
-          mac=$(echo "$line" | awk '{print $2}') ;;
-        *"rx bytes:"*)
-          rx=$(echo "$line" | awk -F":" '{gsub(/ /,"",$2); print $2}');;
-        *"tx bytes:"*)
-          tx=$(echo "$line" | awk -F":" '{gsub(/ /,"",$2); print $2}');;
-        *signal:*)
-          signal=$(echo "$line" | awk '{print $2}');;
-      esac
-    done
-    # Try to resolve IP via ip neigh
-    ip_addr=$(ip neigh | grep -i "$mac" | awk '{print $1}' | head -n1)
-    # Emit JSON line
-    printf '%s\n' "{\"mac\":\"${mac}\",\"ip\":\"${ip_addr}\",\"rx_bytes\":${rx},\"tx_bytes\":${tx},\"signal\":${signal}}"
-  done
+  printf '%s' "$tok" | tr -d '\r\n '
 }
 
 collect_clients() {
-  tmpfile="/tmp/secmynet-clients-$$.json"
-  echo "[]" > "$tmpfile"
-  for iface in $(list_wlan_ifaces); do
-    collect_clients_for_iface "$iface" 2>/dev/null | jq -s '.[ ]' 2>/dev/null | jq -s '.[0]' >/dev/null 2>&1 || true
-    # build array by merging
-    for line in $(collect_clients_for_iface "$iface" 2>/dev/null | sed 's/"/\\\"/g'); do
-      # avoid using complex quoting in POSIX shell — use jq to merge
-      :
-    done
+  tmp="/tmp/stations.$$"
+  rm -f "$tmp"
+  touch "$tmp"
+
+  for iface in $(iw dev 2>/dev/null | sed -n 's/.*Interface //p'); do
+    iw dev "$iface" station dump 2>/dev/null >> "$tmp"
   done
 
-  # Simpler: build clients array by calling collect for each iface and using jq to merge
-  clients_json="[]"
-  for iface in $(list_wlan_ifaces); do
-    data=$(collect_clients_for_iface "$iface" | jq -s '.')
-    clients_json=$(jq -n --argjson a "$clients_json" --argjson b "$data" '$a + $b')
-  done
-  echo "$clients_json"
+  clients="["
+  first=1
+  cur_mac=""
+  rx=0
+  tx=0
+  sig="null"
+
+  while read -r w1 w2 w3 rest; do
+    case "$w1" in
+      Station)
+        if [ -n "$cur_mac" ]; then
+          ip=$(grep -i "$cur_mac" /tmp/dhcp.leases 2>/dev/null | cut -d' ' -f3)
+          [ -z "$ip" ] && ip=$(ip neigh 2>/dev/null | grep -i "$cur_mac" | cut -d' ' -f1)
+          host=$(grep -i "$cur_mac" /tmp/dhcp.leases 2>/dev/null | cut -d' ' -f4)
+          [ "$first" = "0" ] && clients="$clients,"
+          first=0
+          clients="${clients}{\"mac\":\"$cur_mac\",\"ip\":\"${ip:-}\",\"hostname\":\"${host:-}\",\"rx_bytes\":${rx:-0},\"tx_bytes\":${tx:-0},\"signal\":${sig:-null}}"
+        fi
+        cur_mac="$w2"
+        rx=0
+        tx=0
+        sig="null"
+        ;;
+      rx)
+        [ "$w2" = "bytes:" ] && rx="$w3"
+        ;;
+      tx)
+        [ "$w2" = "bytes:" ] && tx="$w3"
+        ;;
+      signal:)
+        sig=$(echo "$w2" | tr -dc '0-9-')
+        [ -z "$sig" ] && sig="null"
+        ;;
+    esac
+  done < "$tmp"
+
+  if [ -n "$cur_mac" ]; then
+    ip=$(grep -i "$cur_mac" /tmp/dhcp.leases 2>/dev/null | cut -d' ' -f3)
+    [ -z "$ip" ] && ip=$(ip neigh 2>/dev/null | grep -i "$cur_mac" | cut -d' ' -f1)
+    host=$(grep -i "$cur_mac" /tmp/dhcp.leases 2>/dev/null | cut -d' ' -f4)
+    [ "$first" = "0" ] && clients="$clients,"
+    clients="${clients}{\"mac\":\"$cur_mac\",\"ip\":\"${ip:-}\",\"hostname\":\"${host:-}\",\"rx_bytes\":${rx:-0},\"tx_bytes\":${tx:-0},\"signal\":${sig:-null}}"
+  fi
+
+  rm -f "$tmp"
+  clients="$clients]"
+  echo "$clients"
 }
 
 post_telemetry() {
@@ -97,46 +101,54 @@ post_telemetry() {
   fi
 
   clients=$(collect_clients 2>/dev/null)
-  totals=$(echo "$clients" | jq '{rx_bytes: (reduce .[] as $c (0; . + ($c.rx_bytes // 0))), tx_bytes: (reduce .[] as $c (0; . + ($c.tx_bytes // 0)))}')
-  payload=$(jq -n --argjson clients "$clients" --argjson totals "$totals" --arg ts "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" '{interfaces: [], clients: $clients, totals: $totals, timestamp: $ts}')
+  [ -z "$clients" ] && clients="[]"
+  payload="{\"clients\":$clients,\"usage\":[]}"
 
-  res=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST "$SERVER_URL/api/openwrt/routers/$ROUTER_ID/telemetry" -H "Content-Type: application/json" -H "x-secmynet-agent-token: $token" -d "$payload" --max-time 15)
+  res=$(curl -s -w "HTTPSTATUS:%{http_code}" -X POST "$SERVER_URL/api/openwrt/routers/$ROUTER_ID/telemetry" \
+    -H "Content-Type: application/json" \
+    -H "x-secmynet-agent-token: $token" \
+    -d "$payload" --max-time 15)
+
   http_code=$(echo "$res" | tr -d '\r' | sed -n 's/.*HTTPSTATUS:\([0-9][0-9][0-9]\)$/\1/p')
   body=$(echo "$res" | sed -e 's/HTTPSTATUS:.*//g')
+
   if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
-    log "Telemetry posted successfully: clients=$(echo "$clients" | jq 'length')"
+    count=$(echo "$clients" | grep -o '{"mac"' | wc -l)
+    log "Telemetry posted successfully: $count clients"
+    echo "Telemetry posted successfully: $count clients"
     return 0
   else
     log "Telemetry post failed: code=$http_code body=$body"
+    echo "Telemetry post failed: code=$http_code body=$body"
     return 1
   fi
 }
 
-# Poll for commands and attempt to execute them
 poll_commands() {
   token="$(read_token)"
   [ -z "$ROUTER_ID" ] && return 1
-  res=$(curl -s -X GET "$SERVER_URL/api/openwrt/routers/$ROUTER_ID/commands" -H "x-secmynet-agent-token: $token" --max-time 15)
-  if [ -z "$res" ]; then return 1; fi
-  commands=$(echo "$res" | jq -c '.commands[]?')
+
+  res=$(curl -s -X GET "$SERVER_URL/api/openwrt/routers/$ROUTER_ID/commands" \
+    -H "x-secmynet-agent-token: $token" --max-time 15)
+  [ -z "$res" ] && return 1
+
+  commands=$(echo "$res" | jq -c '.commands[]?' 2>/dev/null)
   for cmd in $commands; do
-    id=$(echo "$cmd" | jq -r '.id')
-    type=$(echo "$cmd" | jq -r '.command_type')
-    payload=$(echo "$cmd" | jq -r '.payload_json')
+    id=$(echo "$cmd" | jq -r '.id' 2>/dev/null)
+    type=$(echo "$cmd" | jq -r '.command_type' 2>/dev/null)
+    payload=$(echo "$cmd" | jq -r '.payload_json' 2>/dev/null)
 
     case "$type" in
       disconnect)
-        mac=$(echo "$payload" | jq -r '.mac')
-        # try to remove station from all wlan ifaces
-        for iface in $(list_wlan_ifaces); do
+        mac=$(echo "$payload" | jq -r '.mac' 2>/dev/null)
+        for iface in $(iw dev 2>/dev/null | sed -n 's/.*Interface //p'); do
           iw dev "$iface" station del "$mac" 2>/dev/null || hostapd_cli -i "$iface" deauthenticate "$mac" 2>/dev/null || true
         done
         ;;
       block)
-        mac=$(echo "$payload" | jq -r '.mac')
+        mac=$(echo "$payload" | jq -r '.mac' 2>/dev/null)
         mkdir -p /etc/secmynet-agent
         echo "$mac" >> /etc/secmynet-agent/blocked_macs
-        # try to add to wireless maclist if UCI available
         if command -v uci >/dev/null 2>&1; then
           for ifname in $(uci show wireless | grep "\.maclist" | sed -E "s/.*\['?(.*)'?\].*/\\1/" | cut -d '.' -f1); do
             uci add_list wireless.@wifi-iface[0].maclist="$mac" 2>/dev/null || true
@@ -146,8 +158,7 @@ poll_commands() {
         fi
         ;;
       allow)
-        mac=$(echo "$payload" | jq -r '.mac')
-        # remove from blocked_macs
+        mac=$(echo "$payload" | jq -r '.mac' 2>/dev/null)
         sed -i "/$mac/d" /etc/secmynet-agent/blocked_macs 2>/dev/null || true
         if command -v uci >/dev/null 2>&1; then
           uci del_list wireless.@wifi-iface[0].maclist="$mac" 2>/dev/null || true
@@ -156,7 +167,6 @@ poll_commands() {
         fi
         ;;
       restart)
-        # restart wifi only
         wifi reload 2>/dev/null || reboot 2>/dev/null || true
         ;;
       *)
@@ -164,12 +174,13 @@ poll_commands() {
         ;;
     esac
 
-    # Notify server command completed (best-effort, mark as success)
-    curl -s -X POST "$SERVER_URL/api/openwrt/routers/$ROUTER_ID/commands/$id/complete" -H "x-secmynet-agent-token: $token" -H "Content-Type: application/json" -d '{"success":true}' --max-time 10 >/dev/null 2>&1 || true
+    curl -s -X POST "$SERVER_URL/api/openwrt/routers/$ROUTER_ID/commands/$id/complete" \
+      -H "x-secmynet-agent-token: $token" \
+      -H "Content-Type: application/json" \
+      -d '{"success":true}' --max-time 10 >/dev/null 2>&1 || true
   done
 }
 
-# Main loop
 main() {
   mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
   while true; do
@@ -179,7 +190,10 @@ main() {
   done
 }
 
-# If run directly, start main
-if [ "$(basename "$0")" = "agent.sh" ]; then
-  main
+if [ "$1" = "--once" ]; then
+  post_telemetry
+  poll_commands
+  exit $?
 fi
+
+main

@@ -20,13 +20,24 @@ function connectedForDevice(id) { return state.data.connections.filter((c) => (c
 function connectionsForDevice(id) { return state.data.connections.filter((c) => (c.device_id || c.deviceId) === id); }
 function locationForDevice(device) { return device.location || state.data.locations.find((l) => l.id === device.location_id); }
 
-function renderOverview() { const d = state.data; return `<div class="stats">${stat('Locations', d.stats.totalLocations, 'managed sites')}${stat('Devices', d.stats.totalDevices, 'WiFi devices')}${stat('Users', d.stats.totalUsers, 'registered accounts')}${stat('Connected now', d.stats.activeConnections, 'active sessions')}</div><section class="content-card"><h3>Quick access</h3><div class="quick-links"><button data-go="locations">View locations</button><button data-go="devices">View devices</button><button data-go="users">Review users</button><button data-go="manage">Manage access</button></div></section><section class="content-card"><h3>Current connections</h3>${table(['User', 'Device', 'Data used', 'Status'], d.connections.filter((c) => c.status === 'connected').map((c) => `<tr><td>${escapeHtml(c.userName)}</td><td>${escapeHtml(c.deviceName)}</td><td>${mb(c.dataUsedMb)}</td><td><span class="status-badge connected">Connected</span></td></tr>`).join(''))}</section>`; }
+function renderOverview() {
+  const d = state.data;
+  const telemetryClients = (state.routers || []).flatMap((r) => (r.clients || []).map((cl) => ({ ...cl, routerName: r.name })));
+  const totalActive = Math.max(d.stats.activeConnections, telemetryClients.length);
+  const connRows = d.connections.filter((c) => c.status === 'connected').map((c) => `<tr><td>${escapeHtml(c.userName)}</td><td>${escapeHtml(c.deviceName)}</td><td>${mb(c.dataUsedMb)}</td><td><span class="status-badge connected">Connected</span></td></tr>`).join('');
+  const telemetryRows = telemetryClients.map((cl) => {
+    const totalMb = ((Number(cl.rx_bytes || 0) + Number(cl.tx_bytes || 0)) / (1024 * 1024)).toFixed(2);
+    return `<tr><td><strong>${escapeHtml(cl.hostname || 'Client')}</strong><small>${escapeHtml(cl.mac || '')}</small></td><td>${escapeHtml(cl.routerName)}</td><td>${mb(totalMb)}</td><td><span class="status-badge connected">Connected</span></td></tr>`;
+  }).join('');
+  const allRows = (connRows + telemetryRows);
+  return `<div class="stats">${stat('Locations', d.stats.totalLocations, 'managed sites')}${stat('Devices', d.stats.totalDevices, 'WiFi devices')}${stat('Users', d.stats.totalUsers, 'registered accounts')}${stat('Connected now', totalActive, 'active sessions')}</div><section class="content-card"><h3>Quick access</h3><div class="quick-links"><button data-go="locations">View locations</button><button data-go="devices">View devices</button><button data-go="users">Review users</button><button data-go="manage">Manage access</button></div></section><section class="content-card"><h3>Current connections</h3>${table(['User / Client', 'Device / Router', 'Data used', 'Status'], allRows)}</section>`;
+}
 function renderLocations() { const cards = state.data.locations.map((l) => { const devices = state.data.devices.filter((d) => d.location_id === l.id); const conns = devices.flatMap((d) => connectionsForDevice(d.id)); return `<article class="location-card"><button class="location-card-content" data-location="${escapeHtml(l.id)}"><span class="card-kicker">${escapeHtml(l.city)}</span><h3>${escapeHtml(l.name)}</h3><div><strong>${devices.length}</strong> devices · <strong>${mb(usage(conns))}</strong> consumed</div><small>${connectedForLocation(l.id)} users connected now</small><span class="card-link">Open location details →</span></button><div style="display:flex;gap:6px;margin-top:auto"><button class="action-button edit-location" data-edit-location="${escapeHtml(l.id)}">Edit Location</button><button class="action-button danger-action" data-delete-location="${escapeHtml(l.id)}">Delete Location</button></div></article>`; }).join(''); const target = state.locationFormTarget; const addForm = state.showLocationForm ? `<section class="content-card"><h3>${target ? 'Edit Location' : 'Add Location'}</h3><form id="locationForm"><input name="name" placeholder="Location name" value="${escapeHtml(target?.name || '')}" required><input name="city" placeholder="City" value="${escapeHtml(target?.city || '')}" required><button class="compact-button">${target ? 'Update Location' : 'Save Location'}</button></form></section>` : ''; const addButton = state.showLocationForm ? '' : '<button data-add="location">+ Add Location</button>'; return `${addForm}<div class="section-toolbar"><p>Choose a location to see every WiFi device and its users.</p>${addButton}</div><div class="location-grid">${cards || '<p class="empty">No locations have been added yet.</p>'}</div>`; }
 function connectedForLocation(id) { return state.data.devices.filter((d) => d.location_id === id).reduce((count, d) => count + connectedForDevice(d.id).length, 0); }
 function renderLocationDetail(location) { const devices = state.data.devices.filter((d) => d.location_id === location.id); return `<div class="detail-summary"><span class="card-kicker">${escapeHtml(location.city)}</span><h3>${escapeHtml(location.name)}</h3><p>${devices.length} WiFi devices · ${connectedForLocation(location.id)} users currently connected</p><div style="display:flex;gap:8px;"><button class="action-button" data-edit-location="${escapeHtml(location.id)}">Edit Location</button><button class="action-button danger-action" data-delete-location="${escapeHtml(location.id)}">Delete Location</button></div></div>${devices.map(renderDeviceBlock).join('') || '<p class="empty">There are no WiFi devices at this location yet.</p>'}`; }
 function periodCells(conns) { return `<td>${mb(usage(conns, 'day'))}</td><td>${mb(usage(conns, 'week'))}</td><td>${mb(usage(conns, 'month'))}</td><td>${mb(usage(conns, 'year'))}</td>`; }
 function renderDeviceBlock(device) { const conns = connectionsForDevice(device.id); const active = connectedForDevice(device.id); const users = active.map((c) => { const userConns = conns.filter((x) => (x.user_id || x.userId) === (c.user_id || c.userId)); return `<tr><td>${escapeHtml(c.userName)}<small>${escapeHtml(c.userEmail)}</small></td>${periodCells(userConns)}<td>${mb(usage(userConns))}</td><td><button class="action-button danger-action" data-disconnect="${device.id}|${c.user_id || c.userId}">Disconnect</button><button class="action-button danger-action" data-block="${device.id}|${c.user_id || c.userId}">Blacklist</button><button class="action-button danger-action" data-delete-user="${c.user_id || c.userId}">Delete User</button></td></tr>`; }).join(''); return `<section class="content-card device-block"><div class="device-heading"><div><h3>${escapeHtml(device.name)}</h3><p>${escapeHtml(device.wifi_name || device.wifiName)} · ${active.length} connected</p></div><span class="status-badge ${escapeHtml(device.status)}">${escapeHtml(device.status)}</span></div>${table(['Internet user', 'Today', 'Week', 'Month', 'Year', 'Since start', 'Actions'], users)}</section>`; }
-function deviceList() { const deviceFilter = `<div class="usage-header"><button type="button" id="deviceUsageFilterToggle" class="column-filter-title">Data Consumed</button><select id="deviceUsageFilter" aria-label="Filter device data consumed period"><option value="all" ${state.deviceUsagePeriod === 'all' ? 'selected' : ''}>Since Start</option><option value="month" ${state.deviceUsagePeriod === 'month' ? 'selected' : ''}>Last Month</option><option value="week" ${state.deviceUsagePeriod === 'week' ? 'selected' : ''}>Last Week</option><option value="day" ${state.deviceUsagePeriod === 'day' ? 'selected' : ''}>Today</option></select></div>`; const body = state.data.devices.map((d) => { const l = locationForDevice(d) || {}; const router = state.routers.find((r) => r.id === d.router_id); const conns = connectionsForDevice(d.id); const sn = d.serial_number || d.serialNumber || (router ? (router.serial_number || router.serialNumber) : 'N/A'); const routerId = d.router_id || d.routerId || (router ? router.id : '') || 'N/A'; return `<tr><td style="text-align:center"><button class="text-link" data-device="${d.id}">${escapeHtml(d.name)}</button><button class="action-button edit-device-button" style="display:block;margin:6px auto 0" data-edit-device="${d.id}">Edit Device</button></td><td><code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(routerId)}</code></td><td><code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(sn)}</code></td><td>${escapeHtml(d.wifi_name || d.wifiName)}</td><td>${escapeHtml(l.name || 'Unknown')}</td><td>${escapeHtml(d.ip_address || d.ipAddress || 'IP unavailable')}</td><td>${mb(usage(conns, state.deviceUsagePeriod))}</td><td>${connectedForDevice(d.id).length}</td><td><button class="action-button" data-restart="${d.id}">Restart</button><button class="action-button" data-device="${d.id}">View details</button><button class="action-button danger-action" data-delete-device="${d.id}">Delete Device</button></td></tr>`; }).join(''); return table(['Device Name', 'Router ID', 'Serial Number', 'WiFi Name', 'Location', 'IP address', deviceFilter, 'Active Users', 'Actions'], body); }
+function deviceList() { const deviceFilter = `<div class="usage-header"><button type="button" id="deviceUsageFilterToggle" class="column-filter-title">Data Consumed</button><select id="deviceUsageFilter" aria-label="Filter device data consumed period"><option value="all" ${state.deviceUsagePeriod === 'all' ? 'selected' : ''}>Since Start</option><option value="month" ${state.deviceUsagePeriod === 'month' ? 'selected' : ''}>Last Month</option><option value="week" ${state.deviceUsagePeriod === 'week' ? 'selected' : ''}>Last Week</option><option value="day" ${state.deviceUsagePeriod === 'day' ? 'selected' : ''}>Today</option></select></div>`; const body = state.data.devices.map((d) => { const l = locationForDevice(d) || {}; const router = state.routers.find((r) => r.id === d.router_id); const conns = connectionsForDevice(d.id); const sn = d.serial_number || d.serialNumber || (router ? (router.serial_number || router.serialNumber) : 'N/A'); const routerId = d.router_id || d.routerId || (router ? router.id : '') || 'N/A'; return `<tr><td style="text-align:center"><button class="text-link" data-device="${d.id}">${escapeHtml(d.name)}</button><button class="action-button edit-device-button" style="display:block;margin:6px auto 0" data-edit-device="${d.id}">Edit Device</button></td><td><code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(routerId)}</code></td><td><code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(sn)}</code></td><td>${escapeHtml(d.wifi_name || d.wifiName)}</td><td>${escapeHtml(l.name || 'Unknown')}</td><td>${escapeHtml(d.ip_address || d.ipAddress || 'IP unavailable')}</td><td>${mb(usage(conns, state.deviceUsagePeriod))}</td><td>${connectedForDevice(d.id).length}</td><td><button class="action-button" data-restart="${d.id}">Restart</button><button class="action-button" data-device="${d.id}">Details</button><button class="action-button danger-action" data-delete-device="${d.id}">Delete</button></td></tr>`; }).join(''); return table(['Device Name', 'Router ID', 'Serial Number', 'WiFi Name', 'Location', 'IP address', deviceFilter, 'Active Users', 'Actions'], body); }
 function renderDevices() { return `<div class="section-toolbar"><p>All WiFi devices across every managed location.</p></div>${deviceList()}`; }
 function renderAddDevice(device = null) { const editing = Boolean(device); const routerId = device?.router_id || device?.routerId || ''; return `<section class="content-card"><h3>${editing ? 'Edit the WiFi device' : 'Add a WiFi device'}</h3><p>${editing ? 'Update the device details.' : 'Add a device to one of your existing locations. Router ID is automatically generated in the database upon registration.'}</p><form id="deviceForm" data-editing-device="${editing ? escapeHtml(device.id) : ''}"><select name="locationId" required><option value="">Select location</option>${state.data.locations.map((l) => `<option value="${escapeHtml(l.id)}" ${device?.location_id === l.id ? 'selected' : ''}>${escapeHtml(l.name)}</option>`).join('')}</select><input name="name" placeholder="Device name" value="${editing ? escapeHtml(device.name) : ''}" required>${editing ? `<div style="margin-bottom:12px;"><label style="font-size:0.85rem;color:#64748b;display:block;margin-bottom:4px;font-weight:500;">Router ID (generated in database)</label><input name="routerId" value="${escapeHtml(routerId)}" readonly style="background:#f8fafc;cursor:not-allowed;font-family:monospace;font-weight:600;color:#0f172a;"></div>` : ''}<input name="wifiName" placeholder="WiFi name" value="${editing ? escapeHtml(device.wifi_name || device.wifiName) : ''}" required><input id="deviceSerialInput" name="serialNumber" placeholder="Serial Number (e.g. 849201-X7K2M9)" value="${editing ? escapeHtml(device.serial_number || device.serialNumber || '') : ''}"><input name="ipAddress" type="text" inputmode="numeric" autocomplete="off" maxlength="15" pattern="(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){3}" placeholder="IPv4 address (e.g. 192.168.255.254)" value="${editing ? escapeHtml(device.ip_address || device.ipAddress || '') : ''}" aria-label="IPv4 address" required><button>${editing ? 'Update device' : 'Save device'}</button></form></section>${editing ? '' : `<section class="content-card"><h3>Already listed devices</h3>${deviceList()}</section>`}`; }
 function renderDeviceDetail(device) { const location = locationForDevice(device) || {}; const routerId = device.router_id || device.routerId || 'N/A'; return `<div class="detail-summary"><span class="card-kicker">${escapeHtml(location.name || 'Unknown location')}</span><h3>${escapeHtml(device.name)}</h3><p>Router ID: <code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(routerId)}</code> · WiFi: ${escapeHtml(device.wifi_name || device.wifiName)} · ${mb(usage(connectionsForDevice(device.id)))} consumed since start</p></div>${renderDeviceBlock(device)}`; }
@@ -39,7 +50,7 @@ function userRows() {
 		const userId = connection.user_id || connection.userId;
 		const deviceId = connection.device_id || connection.deviceId;
 		const device = state.data.devices.find((item) => item.id === deviceId) || {};
-		const deviceIp = device.ip || device.device_ip || device.ipAddress || 'IP unavailable';
+		const deviceIp = connection.deviceIp || device.ip || device.device_ip || device.ipAddress || 'IP unavailable';
 		const location = locationForDevice(device) || {};
 		const user = state.data.users.find((item) => item.id === userId) || {};
 		const userConnections = state.data.connections.filter((item) => (item.user_id || item.userId) === userId && (item.device_id || item.deviceId) === deviceId);
@@ -47,20 +58,78 @@ function userRows() {
 		const disabled = user.accessStatus === 'disabled';
 		const status = disabled ? '<span class="status-badge blocked">Disabled</span>' : pendingRequest ? '<span class="status-badge quarantine">Quarantine</span>' : '<span class="status-badge connected">Connected</span>';
 		const actions = pendingRequest
-			? `<button class="action-button" data-notification-response="${pendingRequest.id}|allow">Allow</button><button class="action-button danger" data-notification-response="${pendingRequest.id}|deny">Blacklist</button><button class="action-button danger-action" data-delete-user="${escapeHtml(userId)}">Delete User</button>`
-			: `<button class="action-button" data-disconnect="${escapeHtml(deviceId)}|${escapeHtml(userId)}">Disconnect</button><button class="action-button danger" data-block="${escapeHtml(deviceId)}|${escapeHtml(userId)}">Blacklist</button><button class="action-button danger-action" data-delete-user="${escapeHtml(userId)}">Delete User</button>`;
-		return `<tr><td>${escapeHtml(user.name || connection.userName)}<small>${escapeHtml(user.email || connection.userEmail)}</small></td><td>${escapeHtml(location.name || '—')}</td><td>${escapeHtml(device.name || connection.deviceName)}<small>${escapeHtml(deviceIp)}</small></td><td>${mb(usage(userConnections, state.usagePeriod))}</td><td>${status}</td><td>${actions}</td></tr>`;
+			? `<button class="action-button" data-notification-response="${pendingRequest.id}|allow">Allow</button><button class="action-button danger" data-notification-response="${pendingRequest.id}|deny">Blacklist</button><button class="action-button danger-action" data-delete-user="${escapeHtml(userId)}">Delete</button>`
+			: `<button class="action-button" data-user-details="${escapeHtml(userId)}">Details</button><button class="action-button danger-action" data-disconnect="${escapeHtml(deviceId)}|${escapeHtml(userId)}">Disconnect</button><button class="action-button danger" data-block="${escapeHtml(deviceId)}|${escapeHtml(userId)}">Blacklist</button><button class="action-button danger-action" data-delete-user="${escapeHtml(userId)}">Delete</button>`;
+
+		// Check if there is telemetry from any router for this user/client
+		const clientMac = (user.email || connection.userEmail || '').toLowerCase();
+		const isMac = /^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(clientMac) || (userId && userId.startsWith('user-mac-'));
+		const rClient = (state.routers || []).flatMap((r) => r.clients || []).find((c) => (c.mac || '').toLowerCase() === clientMac);
+		let usageHtml = '';
+		const totalDataVal = usage(userConnections, state.usagePeriod);
+		if (rClient) {
+			const rxMb = (Number(rClient.rx_bytes || 0) / (1024 * 1024)).toFixed(2);
+			const txMb = (Number(rClient.tx_bytes || 0) / (1024 * 1024)).toFixed(2);
+			const liveTotalMb = ((Number(rClient.rx_bytes || 0) + Number(rClient.tx_bytes || 0)) / (1024 * 1024)).toFixed(2);
+			const finalTotal = state.usagePeriod === 'all' ? Math.max(Number(totalDataVal), Number(liveTotalMb)).toFixed(2) : totalDataVal;
+			usageHtml = `<strong>${mb(finalTotal)}</strong><small style="display:block;color:#64748b;font-size:0.75rem;margin-top:2px;">RX: ${mb(rxMb)} · TX: ${mb(txMb)}</small>`;
+		} else {
+			usageHtml = `<strong>${mb(totalDataVal)}</strong>`;
+		}
+
+		const nameHtml = `<strong>${escapeHtml(user.name || connection.userName)}</strong><small>${isMac ? 'MAC: ' : ''}${escapeHtml(user.email || connection.userEmail)}</small>${rClient && rClient.signal !== undefined ? `<small style="display:block;color:#0284c7;font-size:0.72rem;margin-top:2px;">📶 Signal: ${rClient.signal} dBm</small>` : ''}`;
+		const devHtml = `<strong>${escapeHtml(device.name || connection.deviceName)}</strong><small>IP: <code>${escapeHtml(deviceIp)}</code></small>${device.router_id || device.routerId ? `<small style="display:block;color:#64748b;font-size:0.72rem;">Router ID: ${escapeHtml(device.router_id || device.routerId)}</small>` : ''}`;
+
+		return `<tr><td>${nameHtml}</td><td>${escapeHtml(location.name || '—')}</td><td>${devHtml}</td><td>${usageHtml}</td><td>${status}</td><td>${actions}</td></tr>`;
+	});
+
+	// Also include any real-time OpenWrt clients that might not be in connectionItems yet
+	const routerClientItems = (state.routers || []).flatMap((r) => {
+		return (r.clients || []).filter((cl) => {
+			const mac = (cl.mac || '').toLowerCase();
+			return !activeConnections.some((c) => (c.user_email || c.userEmail || c.user_id || '').toLowerCase().includes(mac));
+		}).map((cl) => {
+			const rxMb = (Number(cl.rx_bytes || 0) / (1024 * 1024)).toFixed(2);
+			const txMb = (Number(cl.tx_bytes || 0) / (1024 * 1024)).toFixed(2);
+			const totalMb = ((Number(cl.rx_bytes || 0) + Number(cl.tx_bytes || 0)) / (1024 * 1024)).toFixed(2);
+			const devName = r.name || 'OpenWrt Router';
+			const devIp = cl.ip || '192.168.1.1';
+			const locName = r.location_name || 'Unassigned';
+			const fakeUserId = 'user-mac-' + (cl.mac || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+			const actions = `<button class="action-button" data-user-details="${escapeHtml(fakeUserId)}">Details</button><button class="action-button danger-action" data-disconnect-router-client="${r.id}|${cl.mac}">Disconnect</button><button class="action-button danger" data-block-router-client="${r.id}|${cl.mac}">Blacklist</button>`;
+			return `<tr><td><strong>${escapeHtml(cl.hostname || 'Client')}</strong><small>MAC: ${escapeHtml(cl.mac || '')}</small><small style="display:block;color:#0284c7;font-size:0.72rem;margin-top:2px;">📶 Signal: ${cl.signal !== undefined ? cl.signal + ' dBm' : '—'} · Wi-Fi Client</small></td><td>${escapeHtml(locName)}</td><td><strong>${escapeHtml(devName)}</strong><small>IP: <code>${escapeHtml(devIp)}</code></small><small style="display:block;color:#64748b;font-size:0.72rem;">Router ID: ${escapeHtml(r.id)}</small></td><td><strong>${mb(totalMb)}</strong><small style="display:block;color:#64748b;font-size:0.75rem;margin-top:2px;">RX: ${mb(rxMb)} · TX: ${mb(txMb)}</small></td><td><span class="status-badge connected">Connected</span></td><td>${actions}</td></tr>`;
+		});
 	});
 
 	const extraUserItems = registeredUsers.map((user) => {
 		const userConns = state.data.connections.filter((item) => (item.user_id || item.userId) === user.id);
 		const disabled = user.accessStatus === 'disabled';
 		const status = disabled ? '<span class="status-badge blocked">Disabled</span>' : '<span class="status-badge">Registered</span>';
-		const actions = `<button class="action-button" data-toggle-user="${escapeHtml(user.id)}">${disabled ? 'Enable Access' : 'Disable Access'}</button><button class="action-button danger-action" data-delete-user="${escapeHtml(user.id)}">Delete User</button>`;
-		return `<tr><td>${escapeHtml(user.name)}<small>${escapeHtml(user.email)}</small></td><td>—</td><td>—</td><td>${mb(usage(userConns, state.usagePeriod))}</td><td>${status}</td><td>${actions}</td></tr>`;
+		const clientMac = (user.email || '').toLowerCase();
+		const isMac = /^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(clientMac) || user.id.startsWith('user-mac-');
+		const rClient = (state.routers || []).flatMap((r) => r.clients || []).find((c) => (c.mac || '').toLowerCase() === clientMac);
+		const matchedRouter = rClient ? (state.routers || []).find((r) => (r.clients || []).some((c) => (c.mac || '').toLowerCase() === clientMac)) : null;
+
+		let usageHtml = '';
+		const totalDataVal = usage(userConns, state.usagePeriod);
+		if (rClient) {
+			const rxMb = (Number(rClient.rx_bytes || 0) / (1024 * 1024)).toFixed(2);
+			const txMb = (Number(rClient.tx_bytes || 0) / (1024 * 1024)).toFixed(2);
+			const liveTotalMb = ((Number(rClient.rx_bytes || 0) + Number(rClient.tx_bytes || 0)) / (1024 * 1024)).toFixed(2);
+			const finalTotal = state.usagePeriod === 'all' ? Math.max(Number(totalDataVal), Number(liveTotalMb)).toFixed(2) : totalDataVal;
+			usageHtml = `<strong>${mb(finalTotal)}</strong><small style="display:block;color:#64748b;font-size:0.75rem;margin-top:2px;">RX: ${mb(rxMb)} · TX: ${mb(txMb)}</small>`;
+		} else {
+			usageHtml = `<strong>${mb(totalDataVal)}</strong>`;
+		}
+
+		const nameHtml = `<strong>${escapeHtml(user.name)}</strong><small>${isMac ? 'MAC: ' : ''}${escapeHtml(user.email)}</small>${rClient && rClient.signal !== undefined ? `<small style="display:block;color:#0284c7;font-size:0.72rem;margin-top:2px;">📶 Signal: ${rClient.signal} dBm</small>` : ''}`;
+		const locName = matchedRouter?.location_name || '—';
+		const devName = matchedRouter?.name ? `<strong>${escapeHtml(matchedRouter.name)}</strong><small>IP: <code>${escapeHtml(rClient?.ip || user.mobileNumber || user.mobile_number || '—')}</code></small>` : (user.mobileNumber || user.mobile_number ? `<code>${escapeHtml(user.mobileNumber || user.mobile_number)}</code>` : '—');
+		const actions = `<button class="action-button" data-user-details="${escapeHtml(user.id)}">Details</button><button class="action-button" data-toggle-user="${escapeHtml(user.id)}">${disabled ? 'Enable Access' : 'Disable Access'}</button><button class="action-button danger-action" data-delete-user="${escapeHtml(user.id)}">Delete</button>`;
+		return `<tr><td>${nameHtml}</td><td>${escapeHtml(locName)}</td><td>${devName}</td><td>${usageHtml}</td><td>${status}</td><td>${actions}</td></tr>`;
 	});
 
-	return [...connectionItems, ...extraUserItems].join('');
+	return [...connectionItems, ...routerClientItems, ...extraUserItems].join('');
 }
 function renderUsers() { const periodFilter = `<div class="usage-header"><button type="button" id="userUsageFilterToggle" class="column-filter-title">Data Used</button><select id="userUsageFilter" aria-label="Filter data used period"><option value="all" ${state.usagePeriod === 'all' ? 'selected' : ''}>Since start</option><option value="day" ${state.usagePeriod === 'day' ? 'selected' : ''}>Today</option><option value="week" ${state.usagePeriod === 'week' ? 'selected' : ''}>Week</option><option value="month" ${state.usagePeriod === 'month' ? 'selected' : ''}>Month</option><option value="year" ${state.usagePeriod === 'year' ? 'selected' : ''}>Year</option></select></div>`; return `<p class="page-intro">All user accounts, their active location, total data consumption, and access controls.</p>${table(['Name', 'Location', 'Device IP & Name', periodFilter, 'Status', 'Actions'], userRows())}`; }
 function renderManage() { const rows = state.data.locations.map((location) => { const devices = state.data.devices.filter((device) => device.location_id === location.id); return `<tr><td><button class="text-link" data-location="${escapeHtml(location.id)}">${escapeHtml(location.name)}</button></td><td>${escapeHtml(location.city)}</td><td>${devices.length}</td><td>${connectedForLocation(location.id)}</td><td><button class="action-button" data-location="${escapeHtml(location.id)}">View location</button><button class="action-button" data-edit-location="${escapeHtml(location.id)}">Edit Location</button><button class="action-button danger-action" data-delete-location="${escapeHtml(location.id)}">Delete Location</button></td></tr>`; }).join(''); return `<p class="page-intro">All locations currently available in your SecMyNet account.</p>${table(['Location', 'City', 'WiFi devices', 'Active Users', 'Actions'], rows)}`; }
@@ -73,15 +142,342 @@ function renderRouters() {
   const rows = state.routers.map((r) => {
     const sn = r.serial_number || r.serialNumber || 'N/A';
     const lastSeen = r.last_seen_at ? new Date(r.last_seen_at).toLocaleString() : 'Never';
-    const statusBadge = r.status === 'online' ? '<span class="status-badge allowed">Online</span>' : '<span class="status-badge blocked">Offline</span>';
-    return `<tr><td><strong>${escapeHtml(r.name)}</strong></td><td><code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(sn)}</code></td><td><small>${escapeHtml(r.id)}</small></td><td>${escapeHtml(r.location_name || 'Unassigned')}</td><td>${statusBadge}</td><td><small>${lastSeen}</small></td><td><button class="action-button" data-edit-router="${escapeHtml(r.id)}">Edit Router</button><button class="action-button danger-action" data-delete-router="${escapeHtml(r.id)}">Delete Router</button></td></tr>`;
+    const clientCount = Array.isArray(r.clients) ? r.clients.length : 0;
+    const statusBadge = r.status === 'online' ? `<span class="status-badge allowed">Online (${clientCount} client${clientCount === 1 ? '' : 's'})</span>` : '<span class="status-badge blocked">Offline</span>';
+    return `<tr><td><button class="text-link" data-router="${escapeHtml(r.id)}"><strong>${escapeHtml(r.name)}</strong></button></td><td><code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(sn)}</code></td><td><small>${escapeHtml(r.id)}</small></td><td>${escapeHtml(r.location_name || 'Unassigned')}</td><td>${statusBadge}</td><td><small>${lastSeen}</small></td><td><button class="action-button" data-router="${escapeHtml(r.id)}">Details</button><button class="action-button" data-edit-router="${escapeHtml(r.id)}">Edit</button><button class="action-button danger-action" data-delete-router="${escapeHtml(r.id)}">Delete</button></td></tr>`;
   }).join('');
   return `${formHtml}<section class="content-card"><h3>Registered Routers</h3>${table(['Router Name', 'Serial Number', 'Router ID', 'Location', 'Status', 'Last Seen', 'Actions'], rows)}</section>`;
 }
+function renderRouterDetail(router) {
+  const current = state.routers.find((x) => x.id === router.id) || router;
+  const sn = current.serial_number || current.serialNumber || 'N/A';
+  const lastSeen = current.last_seen_at ? new Date(current.last_seen_at).toLocaleString() : 'Never';
+  const agentClients = Array.isArray(current.clients) ? current.clients : [];
+  const statusBadge = current.status === 'online' ? `<span class="status-badge allowed">Online (${agentClients.length} client${agentClients.length === 1 ? '' : 's'})</span>` : '<span class="status-badge blocked">Offline</span>';
+  const linkedDevices = state.data?.devices?.filter((d) => d.router_id === current.id || d.routerId === current.id) || [];
+  const linkedDeviceIds = linkedDevices.map((d) => d.id);
+  const conns = state.data?.connections?.filter((c) => linkedDeviceIds.includes(c.device_id || c.deviceId)) || [];
+  const activeConns = conns.filter((c) => c.status === 'connected');
+  const baseUsage = usage(conns);
+
+  const telemetryTotalBytes = agentClients.reduce((sum, cl) => sum + Number(cl.rx_bytes || 0) + Number(cl.tx_bytes || 0), 0);
+  const telemetryTotalMb = (telemetryTotalBytes / (1024 * 1024)).toFixed(2);
+  const totalDisplayUsage = (Number(baseUsage) + Number(telemetryTotalMb)).toFixed(2);
+  const totalActiveUsers = Math.max(activeConns.length, agentClients.length);
+
+  const summary = `<div class="detail-summary"><span class="card-kicker">${escapeHtml(current.location_name || 'Unassigned location')}</span><h3>${escapeHtml(current.name)}</h3><p>Router ID: <code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(current.id)}</code> · Serial Number: <code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(sn)}</code> · Status: ${statusBadge} · Last Seen: ${lastSeen}</p><div style="display:flex;gap:8px;margin-top:10px;"><button class="action-button" data-edit-router="${escapeHtml(current.id)}">Edit</button><button class="action-button" data-reset-router-token="${escapeHtml(current.id)}">Regenerate Agent Token</button><button class="action-button danger-action" data-delete-router="${escapeHtml(current.id)}">Delete</button></div></div>`;
+  const statsHtml = `<div class="stats">${stat('Total Data Used', mb(totalDisplayUsage), 'across router & linked devices')}${stat('Active Users', totalActiveUsers, 'connected right now')}${stat('Linked Devices', linkedDevices.length, 'WiFi access points')}${stat('Router Status', current.status === 'online' ? 'Online' : 'Offline', current.status === 'online' ? 'Agent reporting' : 'Awaiting agent')}</div>`;
+
+  const uniqueUserIds = [...new Set(conns.map((c) => c.user_id || c.userId))];
+  const userRowsHtml = uniqueUserIds.map((userId) => {
+    const userConns = conns.filter((c) => (c.user_id || c.userId) === userId);
+    const latestConn = userConns[userConns.length - 1] || {};
+    const device = linkedDevices.find((d) => d.id === (latestConn.device_id || latestConn.deviceId)) || {};
+    const userObj = state.data?.users?.find((u) => u.id === userId) || {};
+    const isConnected = userConns.some((c) => c.status === 'connected');
+    const status = isConnected ? '<span class="status-badge connected">Connected</span>' : '<span class="status-badge">Disconnected</span>';
+    const actions = isConnected ? `<button class="action-button danger-action" data-disconnect="${device.id}|${userId}">Disconnect</button><button class="action-button danger-action" data-block="${device.id}|${userId}">Blacklist</button><button class="action-button danger-action" data-delete-user="${userId}">Delete User</button>` : `<button class="action-button danger-action" data-delete-user="${userId}">Delete User</button>`;
+    return `<tr><td><strong>${escapeHtml(userObj.name || latestConn.userName || 'Unknown')}</strong><small>${escapeHtml(userObj.email || latestConn.userEmail || '')}</small></td><td>${escapeHtml(device.name || latestConn.deviceName || 'Unknown')}</td>${periodCells(userConns)}<td><strong>${mb(usage(userConns))}</strong></td><td>${status}</td><td>${actions}</td></tr>`;
+  }).join('');
+
+  const telemetryUserRows = agentClients.map((cl) => {
+    const rxMb = (Number(cl.rx_bytes || 0) / (1024 * 1024)).toFixed(2);
+    const totalMbVal = ((Number(cl.rx_bytes || 0) + Number(cl.tx_bytes || 0)) / (1024 * 1024)).toFixed(2);
+    const devName = linkedDevices[0]?.name || current.name;
+    const actions = `<button class="action-button danger-action" data-block="${current.id}|${cl.mac}">Blacklist</button>`;
+    return `<tr><td><strong>${escapeHtml(cl.hostname || 'Unknown')}</strong><small>${escapeHtml(cl.mac || '')}</small></td><td>${escapeHtml(devName)}</td><td>${mb(rxMb)}</td><td>—</td><td>—</td><td>—</td><td><strong>${mb(totalMbVal)}</strong></td><td><span class="status-badge connected">Connected</span></td><td>${actions}</td></tr>`;
+  }).join('');
+  const allUserRows = (userRowsHtml + telemetryUserRows) || '<tr><td colspan="9" style="text-align:center;padding:24px;color:#64748b;">No connected users currently detected.</td></tr>';
+  const usersSection = `<section class="content-card"><h3>Users & Data Consumption</h3><p class="page-intro" style="margin-top:0;">Details of users connected through this router and their data usage over time.</p>${table(['User', 'Device', 'Today / RX', 'Week', 'Month', 'Year', 'Total Used', 'Status', 'Actions'], allUserRows)}</section>`;
+
+  const deviceRows = linkedDevices.map((d) => {
+    const dConns = connectionsForDevice(d.id);
+    const dActive = connectedForDevice(d.id).length || agentClients.length;
+    const dUsage = Math.max(Number(usage(dConns)), Number(telemetryTotalMb));
+    return `<tr><td><strong>${escapeHtml(d.name)}</strong></td><td>${escapeHtml(d.wifi_name || d.wifiName || '—')}</td><td><code>${escapeHtml(d.ip_address || d.ipAddress || 'IP unavailable')}</code></td><td><span class="status-badge ${escapeHtml(d.status || 'unknown')}">${escapeHtml(d.status || 'Unknown')}</span></td><td>${dActive}</td><td>${mb(dUsage)}</td><td><button class="action-button" data-restart="${d.id}">Restart</button><button class="action-button" data-device="${d.id}">Details</button><button class="action-button danger-action" data-delete-device="${d.id}">Delete</button></td></tr>`;
+  }).join('');
+  const devicesSection = `<section class="content-card"><h3>Linked WiFi Devices (${linkedDevices.length})</h3><p class="page-intro" style="margin-top:0;">WiFi access points configured with Router ID <code>${escapeHtml(current.id)}</code>.</p>${table(['Device Name', 'WiFi SSID', 'IP Address', 'Status', 'Active Users', 'Data Used', 'Actions'], deviceRows)}</section>`;
+
+  let telemetrySection = '';
+  if (agentClients.length > 0) {
+    const clientRows = agentClients.map((cl) => {
+      const rxMb = (Number(cl.rx_bytes || cl.rxBytes || 0) / (1024 * 1024)).toFixed(2);
+      const txMb = (Number(cl.tx_bytes || cl.txBytes || 0) / (1024 * 1024)).toFixed(2);
+      const totalMb = ((Number(cl.rx_bytes || cl.rxBytes || 0) + Number(cl.tx_bytes || cl.txBytes || 0)) / (1024 * 1024)).toFixed(2);
+      const sigText = cl.signal !== null && cl.signal !== undefined ? `${cl.signal} dBm` : '—';
+      return `<tr><td><strong>${escapeHtml(cl.hostname || 'Unknown')}</strong><small>${escapeHtml(cl.mac || cl.client_mac || '—')}</small></td><td><code>${escapeHtml(cl.ip || '—')}</code></td><td>${sigText}</td><td>${mb(rxMb)}</td><td>${mb(txMb)}</td><td><strong>${mb(totalMb)}</strong></td></tr>`;
+    }).join('');
+    telemetrySection = `<section class="content-card"><h3>OpenWrt Real-time Telemetry Clients (${agentClients.length})</h3><p class="page-intro" style="margin-top:0;">Real-time clients actively detected by OpenWrt agent telemetry.</p>${table(['Client Hostname / MAC', 'IP Address', 'Signal', 'RX Data', 'TX Data', 'Total Bandwidth'], clientRows)}</section>`;
+  } else {
+    telemetrySection = `<section class="content-card"><h3>OpenWrt Real-time Telemetry Clients (0)</h3><p class="page-intro" style="margin-top:0;">No active wireless clients detected by OpenWrt agent at this moment.</p></section>`;
+  }
+
+  return `${summary}${statsHtml}${usersSection}${devicesSection}${telemetrySection}`;
+}
 function pageMeta(page) { return ({ overview: ['Overview', 'A real-time summary of your managed WiFi network.'], locations: ['My Locations', 'View locations and open a site to manage its WiFi devices and users.'], devices: ['My Devices', 'Review WiFi devices, usage, connected users, and device controls.'], 'add-device': ['Add Device', 'Add a WiFi device, then review the devices already configured.'], routers: ['Manage Routers', 'Manage hardware routers, unique serial numbers, connection tokens, and router status.'], users: [state.data?.admin?.role === 'super_admin' ? 'All Users' : 'My Users', 'See all user accounts, active location, total data consumption, and access controls.'], manage: ['Manage Locations', 'View the list of locations currently available in your account.'], 'super-admin': ['Admin Accounts Console', 'Manage administrator accounts, create admins, block/unblock portal access, and reset passwords.'], notifications: ['Notifications', 'Connection approvals and data-usage alerts.'] })[page]; }
-function renderAdmin() { const [title, description] = pageMeta(state.page); $('#pageTitle').textContent = state.selected ? `${title}: ${state.selected.name}` : title; $('#pageDescription').textContent = description; $('#backToListBtn').classList.toggle('hidden', !state.selected); $('#addDeviceTopBtn').classList.toggle('hidden', state.page !== 'devices' || Boolean(state.selected)); const admin = state.data?.admin; $('#adminWorkspaceLabel').textContent = admin?.role === 'super_admin' ? 'SuperAdmin Workspace' : 'Admin workspace'; $('#superAdminNavLink')?.classList.toggle('hidden', admin?.role !== 'super_admin'); $('#adminIdentity').classList.toggle('hidden', !admin); if (admin) { const role = admin.role === 'super_admin' ? 'Super Admin' : 'Administrator'; const loggedSince = sessionStartedAt(); $('#adminIdentityLogo').textContent = admin.role === 'super_admin' ? 'SA' : 'AD'; $('#adminIdentity').setAttribute('aria-label', `Logged-in ${role}`); $('#adminIdentityName').textContent = admin.name; $('#adminIdentityEmail').textContent = admin.email; $('#adminIdentityRole').textContent = role; $('#adminIdentityLoggedSince').textContent = formatSessionTime(loggedSince); $('#adminIdentityLoggedSince').dateTime = loggedSince; } document.querySelectorAll('[data-page]').forEach((a) => a.classList.toggle('active', a.dataset.page === state.page)); let content; if (state.selected?.type === 'location') content = renderLocationDetail(state.selected); else if (state.selected?.type === 'device') content = renderDeviceDetail(state.selected); else if (state.page === 'add-device') content = renderAddDevice(state.editingDevice); else content = ({ overview: renderOverview, locations: renderLocations, devices: renderDevices, routers: renderRouters, users: renderUsers, manage: renderManage, 'super-admin': renderSuperAdmin, notifications: renderNotifications })[state.page](); $('#pageContent').innerHTML = content; bindDynamicEvents(); }
-function bindDynamicEvents() { document.querySelectorAll('[data-go]').forEach((b) => b.onclick = () => navigate(b.dataset.go)); document.querySelectorAll('[data-location]').forEach((b) => b.onclick = () => { state.showLocationForm = false; state.locationFormTarget = null; state.page = 'locations'; state.selected = { ...state.data.locations.find((x) => x.id === b.dataset.location), type: 'location' }; renderAdmin(); }); document.querySelectorAll('[data-edit-location]').forEach((b) => b.onclick = () => { state.page = 'locations'; state.selected = null; state.showLocationForm = true; state.locationFormTarget = state.data.locations.find((x) => x.id === b.dataset.editLocation); renderAdmin(); }); document.querySelectorAll('[data-delete-location]').forEach((b) => b.onclick = () => deleteLocationItem(b.dataset.deleteLocation)); document.querySelectorAll('[data-delete-device]').forEach((b) => b.onclick = () => deleteDeviceItem(b.dataset.deleteDevice)); document.querySelectorAll('[data-delete-user]').forEach((b) => b.onclick = () => deleteUserItem(b.dataset.deleteUser)); document.querySelectorAll('[data-device]').forEach((b) => b.onclick = () => { state.showLocationForm = false; state.locationFormTarget = null; state.page = 'devices'; state.selected = { ...state.data.devices.find((x) => x.id === b.dataset.device), type: 'device' }; renderAdmin(); }); document.querySelectorAll('[data-edit-router]').forEach((b) => b.onclick = () => { state.page = 'routers'; state.selected = null; state.routerFormTarget = state.routers.find((x) => x.id === b.dataset.editRouter); renderAdmin(); }); document.querySelectorAll('[data-delete-router]').forEach((b) => b.onclick = () => deleteRouterItem(b.dataset.deleteRouter)); document.querySelectorAll('[data-disconnect]').forEach((b) => b.onclick = () => deviceAction(b.dataset.disconnect, 'disconnect-user', 'Disconnect this user?')); document.querySelectorAll('[data-block]').forEach((b) => b.onclick = () => deviceAction(b.dataset.block, 'disallow-user', 'Blacklist this user and remove their access?')); document.querySelectorAll('[data-restart]').forEach((b) => b.onclick = () => restartDevice(b.dataset.restart)); document.querySelectorAll('[data-toggle-user]').forEach((b) => b.onclick = () => toggleUserAccess(b.dataset.toggleUser)); document.querySelectorAll('[data-super-toggle]').forEach((b) => b.onclick = () => toggleSuperAdmin(b.dataset.superToggle)); document.querySelectorAll('[data-super-delete]').forEach((b) => b.onclick = () => deleteSuperUser(b.dataset.superDelete)); document.querySelectorAll('[data-super-edit]').forEach((b) => b.onclick = () => editSuperAdmin(b.dataset.superEdit)); document.querySelectorAll('[data-super-reset]').forEach((b) => b.onclick = () => sendAdminResetLink(b.dataset.superReset)); $('#userUsageFilterToggle')?.addEventListener('click', () => $('.usage-header')?.classList.toggle('filter-open')); $('#userUsageFilter')?.addEventListener('change', (e) => { state.usagePeriod = e.target.value; renderAdmin(); }); $('#deviceUsageFilterToggle')?.addEventListener('click', () => $('#deviceUsageFilterToggle')?.closest('.usage-header')?.classList.toggle('filter-open')); $('#deviceUsageFilter')?.addEventListener('change', (e) => { state.deviceUsagePeriod = e.target.value; renderAdmin(); }); document.querySelectorAll('[data-add]').forEach((b) => b.onclick = () => { if (b.dataset.add === 'location') { state.page = 'locations'; state.selected = null; state.showLocationForm = true; state.locationFormTarget = null; renderAdmin(); } else navigate('add-device'); }); $('#locationForm')?.addEventListener('submit', addLocation); $('#deviceForm')?.addEventListener('submit', addDevice); $('#routerForm')?.addEventListener('submit', addOrUpdateRouter);
-$('#cancelRouterEditBtn')?.addEventListener('click', () => { state.routerFormTarget = null; renderAdmin(); }); $('#superAdminForm')?.addEventListener('submit', (e) => createSuperAccount(e, 'admins')); }
+function renderAdmin() { const [title, description] = pageMeta(state.page); $('#pageTitle').textContent = state.selected ? `${title}: ${state.selected.name}` : title; $('#pageDescription').textContent = description; $('#backToListBtn').classList.toggle('hidden', !state.selected); $('#addDeviceTopBtn').classList.toggle('hidden', state.page !== 'devices' || Boolean(state.selected)); const admin = state.data?.admin; $('#adminWorkspaceLabel').textContent = admin?.role === 'super_admin' ? 'SuperAdmin Workspace' : 'Admin workspace'; $('#superAdminNavLink')?.classList.toggle('hidden', admin?.role !== 'super_admin'); $('#adminIdentity').classList.toggle('hidden', !admin); if (admin) { const role = admin.role === 'super_admin' ? 'Super Admin' : 'Administrator'; const loggedSince = sessionStartedAt(); $('#adminIdentityLogo').textContent = admin.role === 'super_admin' ? 'SA' : 'AD'; $('#adminIdentity').setAttribute('aria-label', `Logged-in ${role}`); $('#adminIdentityName').textContent = admin.name; $('#adminIdentityEmail').textContent = admin.email; $('#adminIdentityRole').textContent = role; $('#adminIdentityLoggedSince').textContent = formatSessionTime(loggedSince); $('#adminIdentityLoggedSince').dateTime = loggedSince; } document.querySelectorAll('[data-page]').forEach((a) => a.classList.toggle('active', a.dataset.page === state.page)); let content; if (state.selected?.type === 'location') content = renderLocationDetail(state.selected); else if (state.selected?.type === 'device') content = renderDeviceDetail(state.selected); else if (state.selected?.type === 'router') content = renderRouterDetail(state.selected); else if (state.page === 'add-device') content = renderAddDevice(state.editingDevice); else content = ({ overview: renderOverview, locations: renderLocations, devices: renderDevices, routers: renderRouters, users: renderUsers, manage: renderManage, 'super-admin': renderSuperAdmin, notifications: renderNotifications })[state.page](); $('#pageContent').innerHTML = content; bindDynamicEvents(); }
+async function showUserDetailsModal(userId) {
+  const modal = $('#userDetailsModal');
+  const titleEl = $('#userDetailsModalTitle');
+  const contentEl = $('#userDetailsModalContent');
+  if (!modal || !contentEl) return;
+
+  modal.classList.remove('hidden');
+  titleEl.textContent = 'User & Client Details';
+  contentEl.innerHTML = `<div style="text-align:center;padding:32px 16px;color:#64748b;"><div style="font-size:1.5rem;margin-bottom:8px;">⏳</div>Loading client telemetry &amp; data usage...</div>`;
+
+  try {
+    const data = await apiRequest(`/api/users/${encodeURIComponent(userId)}/details`, { headers: authHeaders() });
+    const user = data.user || {};
+    const mac = data.mac || (user.email && /^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(user.email) ? user.email : '');
+    const isMacClient = Boolean(mac) || userId.startsWith('user-mac-');
+    const tel = data.liveTelemetryClient || {};
+    const router = data.routerInfo || {};
+    const conns = data.connections || [];
+    const activeConn = conns.find((c) => c.status === 'connected') || conns[0];
+    const records = data.usageRecords || [];
+
+    const displayName = tel.hostname || user.name || (mac ? `Client (${mac.toUpperCase()})` : 'User');
+    titleEl.textContent = `${displayName} — Details`;
+
+    const ipAddress = tel.ip || data.mobileNumber || user.mobileNumber || activeConn?.device_ip || '—';
+    const routerName = router.name || activeConn?.device_name || '—';
+    const routerId = router.id || activeConn?.router_id || '';
+    const locName = router.locationName || activeConn?.location_name || '—';
+
+    // Calculate usage
+    const rxMb = tel.rx_bytes ? (Number(tel.rx_bytes) / (1024 * 1024)).toFixed(2) : (records[0]?.rx_bytes ? (Number(records[0].rx_bytes) / (1024 * 1024)).toFixed(2) : '—');
+    const txMb = tel.tx_bytes ? (Number(tel.tx_bytes) / (1024 * 1024)).toFixed(2) : (records[0]?.tx_bytes ? (Number(records[0].tx_bytes) / (1024 * 1024)).toFixed(2) : '—');
+    const totalDataVal = activeConn?.dataUsedMb || usage(conns);
+    const liveTotalMb = tel.rx_bytes && tel.tx_bytes ? ((Number(tel.rx_bytes) + Number(tel.tx_bytes)) / (1024 * 1024)).toFixed(2) : totalDataVal;
+    const finalTotal = Math.max(Number(totalDataVal), Number(liveTotalMb)).toFixed(2);
+
+    const isConnected = Boolean(tel.mac) || (activeConn && activeConn.status === 'connected');
+    const statusBadge = user.accessStatus === 'disabled'
+      ? '<span class="status-badge blocked">Disabled</span>'
+      : isConnected
+        ? '<span class="status-badge connected">Connected</span>'
+        : '<span class="status-badge">Offline / Registered</span>';
+
+    const signalText = tel.signal !== undefined && tel.signal !== null ? `${tel.signal} dBm` : '—';
+    const signalQuality = tel.signal ? (tel.signal >= -50 ? 'Excellent' : tel.signal >= -67 ? 'Good' : tel.signal >= -75 ? 'Fair' : 'Weak') : '';
+
+    // Usage records table rows
+    let recordsHtml = '';
+    if (records.length > 0) {
+      const rows = records.slice(0, 8).map((r) => {
+        const time = new Date(r.timestamp).toLocaleTimeString();
+        const dRxKb = (Number(r.delta_rx || 0) / 1024).toFixed(1);
+        const dTxKb = (Number(r.delta_tx || 0) / 1024).toFixed(1);
+        const curRxMb = (Number(r.rx_bytes || 0) / (1024 * 1024)).toFixed(2);
+        const curTxMb = (Number(r.tx_bytes || 0) / (1024 * 1024)).toFixed(2);
+        return `<tr><td style="font-size:0.75rem;padding:6px 8px;">${time}</td><td style="font-size:0.75rem;padding:6px 8px;color:#16a34a;font-weight:600;">+${dRxKb} KB</td><td style="font-size:0.75rem;padding:6px 8px;color:#ca8a04;font-weight:600;">+${dTxKb} KB</td><td style="font-size:0.75rem;padding:6px 8px;">${curRxMb} MB</td><td style="font-size:0.75rem;padding:6px 8px;">${curTxMb} MB</td></tr>`;
+      }).join('');
+      recordsHtml = `
+        <div style="margin-top:16px;">
+          <h4 style="margin:0 0 8px 0;font-size:0.85rem;color:#475569;text-transform:uppercase;letter-spacing:0.5px;">Recent Real-time OpenWrt Telemetry Packets</h4>
+          <div class="table-wrap" style="max-height:160px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:6px;">
+            <table style="width:100%;margin:0;font-size:0.78rem;">
+              <thead><tr><th style="padding:6px 8px;">Time</th><th style="padding:6px 8px;">Delta RX</th><th style="padding:6px 8px;">Delta TX</th><th style="padding:6px 8px;">Total RX</th><th style="padding:6px 8px;">Total TX</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>
+        </div>`;
+    }
+
+    contentEl.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:14px;">
+        <div style="background:#f8fafc;padding:12px 14px;border-radius:8px;border:1px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center;">
+          <div>
+            <div style="font-size:1.1rem;font-weight:700;color:#0f172a;">${escapeHtml(displayName)}</div>
+            <div style="font-size:0.8rem;color:#64748b;margin-top:2px;">${isMacClient ? 'OpenWrt Wireless Client' : 'Portal User Account'}</div>
+          </div>
+          <div>${statusBadge}</div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:0.85rem;">
+          <div style="padding:10px;background:#f1f5f9;border-radius:6px;">
+            <span style="color:#64748b;display:block;font-size:0.72rem;text-transform:uppercase;font-weight:600;">Client IP Address</span>
+            <code style="font-weight:600;color:#0f172a;font-size:0.9rem;">${escapeHtml(ipAddress)}</code>
+          </div>
+          <div style="padding:10px;background:#f1f5f9;border-radius:6px;">
+            <span style="color:#64748b;display:block;font-size:0.72rem;text-transform:uppercase;font-weight:600;">MAC / Identifier</span>
+            <code style="font-weight:600;color:#0f172a;font-size:0.85rem;">${escapeHtml(mac || user.email || '—')}</code>
+          </div>
+          <div style="padding:10px;background:#f1f5f9;border-radius:6px;">
+            <span style="color:#64748b;display:block;font-size:0.72rem;text-transform:uppercase;font-weight:600;">Router &amp; Location</span>
+            <span style="font-weight:600;color:#0f172a;">${escapeHtml(routerName)} ${routerId ? `<code style="font-size:0.75rem;padding:2px 4px;background:#e2e8f0;border-radius:3px;">ID:${routerId}</code>` : ''}</span>
+            <small style="display:block;color:#64748b;">${escapeHtml(locName)}</small>
+          </div>
+          <div style="padding:10px;background:#f1f5f9;border-radius:6px;">
+            <span style="color:#64748b;display:block;font-size:0.72rem;text-transform:uppercase;font-weight:600;">Wi-Fi Signal Strength</span>
+            <span style="font-weight:600;color:#0284c7;font-size:0.95rem;">${escapeHtml(signalText)} ${signalQuality ? `<span style="font-size:0.75rem;color:#16a34a;font-weight:normal;">(${signalQuality})</span>` : ''}</span>
+          </div>
+        </div>
+
+        <div>
+          <h4 style="margin:0 0 8px 0;font-size:0.85rem;color:#475569;text-transform:uppercase;letter-spacing:0.5px;">Data Consumption Details</h4>
+          <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:8px;">
+            <div style="padding:10px;background:#e0f2fe;border-radius:6px;text-align:center;">
+              <span style="display:block;font-size:0.72rem;color:#0369a1;font-weight:600;">Total Used</span>
+              <strong style="font-size:1.15rem;color:#0284c7;">${mb(finalTotal)}</strong>
+            </div>
+            <div style="padding:10px;background:#f0fdf4;border-radius:6px;text-align:center;">
+              <span style="display:block;font-size:0.72rem;color:#15803d;font-weight:600;">Download (RX)</span>
+              <strong style="font-size:1.15rem;color:#16a34a;">${rxMb !== '—' ? mb(rxMb) : '—'}</strong>
+            </div>
+            <div style="padding:10px;background:#fefce8;border-radius:6px;text-align:center;">
+              <span style="display:block;font-size:0.72rem;color:#a16207;font-weight:600;">Upload (TX)</span>
+              <strong style="font-size:1.15rem;color:#ca8a04;">${txMb !== '—' ? mb(txMb) : '—'}</strong>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:6px;margin-top:8px;">
+            <div style="padding:6px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;text-align:center;">
+              <small style="color:#64748b;display:block;font-size:0.68rem;">Today</small>
+              <strong style="font-size:0.82rem;color:#0f172a;">${mb(usage(conns, 'day'))}</strong>
+            </div>
+            <div style="padding:6px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;text-align:center;">
+              <small style="color:#64748b;display:block;font-size:0.68rem;">This Week</small>
+              <strong style="font-size:0.82rem;color:#0f172a;">${mb(usage(conns, 'week'))}</strong>
+            </div>
+            <div style="padding:6px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;text-align:center;">
+              <small style="color:#64748b;display:block;font-size:0.68rem;">This Month</small>
+              <strong style="font-size:0.82rem;color:#0f172a;">${mb(usage(conns, 'month'))}</strong>
+            </div>
+            <div style="padding:6px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;text-align:center;">
+              <small style="color:#64748b;display:block;font-size:0.68rem;">Since Start</small>
+              <strong style="font-size:0.82rem;color:#0f172a;">${mb(usage(conns, 'all'))}</strong>
+            </div>
+          </div>
+        </div>
+
+        ${recordsHtml}
+      </div>
+    `;
+  } catch (err) {
+    contentEl.innerHTML = `<div style="padding:16px;color:#dc2626;background:#fef2f2;border-radius:6px;">Error loading user details: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function bindDynamicEvents() {
+  document.querySelectorAll('[data-go]').forEach((b) => b.onclick = () => navigate(b.dataset.go));
+  document.querySelectorAll('[data-user-details]').forEach((b) => b.onclick = () => showUserDetailsModal(b.dataset.userDetails));
+  document.querySelectorAll('[data-location]').forEach((b) => b.onclick = () => {
+    state.showLocationForm = false;
+    state.locationFormTarget = null;
+    state.page = 'locations';
+    state.selected = { ...state.data.locations.find((x) => x.id === b.dataset.location), type: 'location' };
+    renderAdmin();
+  });
+  document.querySelectorAll('[data-edit-location]').forEach((b) => b.onclick = () => {
+    state.page = 'locations';
+    state.selected = null;
+    state.showLocationForm = true;
+    state.locationFormTarget = state.data.locations.find((x) => x.id === b.dataset.editLocation);
+    renderAdmin();
+  });
+  document.querySelectorAll('[data-delete-location]').forEach((b) => b.onclick = () => deleteLocationItem(b.dataset.deleteLocation));
+  document.querySelectorAll('[data-delete-device]').forEach((b) => b.onclick = () => deleteDeviceItem(b.dataset.deleteDevice));
+  document.querySelectorAll('[data-delete-user]').forEach((b) => b.onclick = () => deleteUserItem(b.dataset.deleteUser));
+  document.querySelectorAll('[data-device]').forEach((b) => b.onclick = () => {
+    state.showLocationForm = false;
+    state.locationFormTarget = null;
+    state.page = 'devices';
+    state.selected = { ...state.data.devices.find((x) => x.id === b.dataset.device), type: 'device' };
+    renderAdmin();
+  });
+  document.querySelectorAll('[data-router]').forEach((b) => b.onclick = () => {
+    state.showLocationForm = false;
+    state.locationFormTarget = null;
+    state.showRouterForm = false;
+    state.routerFormTarget = null;
+    state.page = 'routers';
+    const found = state.routers.find((x) => x.id === b.dataset.router);
+    if (found) {
+      state.selected = { ...found, type: 'router' };
+      renderAdmin();
+    }
+  });
+  document.querySelectorAll('[data-edit-router]').forEach((b) => b.onclick = () => {
+    state.page = 'routers';
+    state.selected = null;
+    state.routerFormTarget = state.routers.find((x) => x.id === b.dataset.editRouter);
+    renderAdmin();
+  });
+  document.querySelectorAll('[data-reset-router-token]').forEach((b) => b.onclick = () => {
+    confirmAction('Regenerate the Agent Token for this router? You will need to update /etc/secmynet-agent.conf on the router.', async () => {
+      try {
+        const res = await apiRequest(`/api/openwrt/routers/${b.dataset.resetRouterToken}/reset-token`, { method: 'POST', headers: authHeaders() });
+        alert(`Agent Token Generated Successfully!\n\nRouter ID: ${res.routerId}\nAgent Token: ${res.agentToken}\n\nUpdate /etc/secmynet-agent.conf on your router:\nSECMYNET_ROUTER_ID="${res.routerId}"\nSECMYNET_AGENT_TOKEN="${res.agentToken}"`);
+      } catch (e) { alert(e.message); }
+    });
+  });
+  document.querySelectorAll('[data-delete-router]').forEach((b) => b.onclick = () => deleteRouterItem(b.dataset.deleteRouter));
+  document.querySelectorAll('[data-disconnect]').forEach((b) => b.onclick = () => deviceAction(b.dataset.disconnect, 'disconnect-user', 'Disconnect this user?'));
+  document.querySelectorAll('[data-block]').forEach((b) => b.onclick = () => deviceAction(b.dataset.block, 'disallow-user', 'Blacklist this user and remove their access?'));
+  document.querySelectorAll('[data-disconnect-router-client]').forEach((b) => b.onclick = () => {
+    const [routerId, mac] = b.dataset.disconnectRouterClient.split('|');
+    confirmAction(`Disconnect client ${mac} from OpenWrt router?`, async () => {
+      try {
+        await apiRequest(`/api/openwrt/routers/${routerId}/commands`, {
+          method: 'POST',
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ commandType: 'disconnect', mac })
+        });
+        alert('Disconnect command queued for OpenWrt router.');
+        await loadDashboard();
+      } catch (e) { alert(e.message); }
+    });
+  });
+  document.querySelectorAll('[data-block-router-client]').forEach((b) => b.onclick = () => {
+    const [routerId, mac] = b.dataset.blockRouterClient.split('|');
+    confirmAction(`Blacklist and block client ${mac} on router?`, async () => {
+      try {
+        await apiRequest(`/api/openwrt/routers/${routerId}/commands`, {
+          method: 'POST',
+          headers: authHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ commandType: 'block', mac })
+        });
+        alert('Block command queued for OpenWrt router.');
+        await loadDashboard();
+      } catch (e) { alert(e.message); }
+    });
+  });
+  document.querySelectorAll('[data-restart]').forEach((b) => b.onclick = () => restartDevice(b.dataset.restart));
+  document.querySelectorAll('[data-toggle-user]').forEach((b) => b.onclick = () => toggleUserAccess(b.dataset.toggleUser));
+  document.querySelectorAll('[data-super-toggle]').forEach((b) => b.onclick = () => toggleSuperAdmin(b.dataset.superToggle));
+  document.querySelectorAll('[data-super-delete]').forEach((b) => b.onclick = () => deleteSuperUser(b.dataset.superDelete));
+  document.querySelectorAll('[data-super-edit]').forEach((b) => b.onclick = () => editSuperAdmin(b.dataset.superEdit));
+  document.querySelectorAll('[data-super-reset]').forEach((b) => b.onclick = () => sendAdminResetLink(b.dataset.superReset));
+  $('#userUsageFilterToggle')?.addEventListener('click', () => $('.usage-header')?.classList.toggle('filter-open'));
+  $('#userUsageFilter')?.addEventListener('change', (e) => {
+    state.usagePeriod = e.target.value;
+    renderAdmin();
+  });
+  $('#deviceUsageFilterToggle')?.addEventListener('click', () => $('#deviceUsageFilterToggle')?.closest('.usage-header')?.classList.toggle('filter-open'));
+  $('#deviceUsageFilter')?.addEventListener('change', (e) => {
+    state.deviceUsagePeriod = e.target.value;
+    renderAdmin();
+  });
+  document.querySelectorAll('[data-add]').forEach((b) => b.onclick = () => {
+    if (b.dataset.add === 'location') {
+      state.page = 'locations';
+      state.selected = null;
+      state.showLocationForm = true;
+      state.locationFormTarget = null;
+      renderAdmin();
+    } else navigate('add-device');
+  });
+  $('#locationForm')?.addEventListener('submit', addLocation);
+  $('#deviceForm')?.addEventListener('submit', addDevice);
+  $('#routerForm')?.addEventListener('submit', addOrUpdateRouter);
+  $('#cancelRouterEditBtn')?.addEventListener('click', () => { state.routerFormTarget = null; renderAdmin(); });
+  $('#superAdminForm')?.addEventListener('submit', (e) => createSuperAccount(e, 'admins'));
+  $('#userDetailsCloseBtn')?.addEventListener('click', () => $('#userDetailsModal')?.classList.add('hidden'));
+  $('#userDetailsModal')?.addEventListener('click', (e) => {
+    if (e.target.id === 'userDetailsModal') $('#userDetailsModal').classList.add('hidden');
+  });
+}
 function confirmAction(message, action) { const modal = $('#confirmationModal'); $('#confirmationModalText').textContent = message; modal.classList.remove('hidden'); $('#confirmationYesBtn').onclick = async () => { modal.classList.add('hidden'); await action(); }; $('#confirmationNoBtn').onclick = () => modal.classList.add('hidden'); }
 async function deviceAction(value, action, message) { confirmAction(message, async () => { const [deviceId, userId] = value.split('|'); try { await apiRequest(`/api/devices/${deviceId}/${action}`, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ userId }) }); await loadDashboard(); } catch (e) { alert(e.message); } }); }
 async function restartDevice(id) { confirmAction('You are changing the device configurations which may cause the service disconnection. Are you sure?', async () => { try { const result = await apiRequest(`/api/devices/${id}/restart`, { method: 'POST', headers: authHeaders() }); alert(result.message); } catch (e) { alert(e.message); } }); }
@@ -97,7 +493,7 @@ async function deleteSuperUser(id) { confirmAction('Delete this account and its 
 async function loadSuperAdmins() { const response = await apiRequest('/api/super-admin/admins', { headers: authHeaders() }); state.superAdmins = response.admins || []; if (state.page === 'users') renderAdmin(); }
 async function loadOpenWrtRouters() { const response = await apiRequest('/api/openwrt/routers', { headers: authHeaders() }); state.routers = response.routers || []; const countEl = $('#routerCount'); if (countEl) countEl.textContent = state.routers.length; }
 async function addOrUpdateRouter(e) { e.preventDefault(); const form = e.currentTarget; const values = Object.fromEntries(new FormData(form)); const routerId = form.dataset.editingRouter; try { const response = await apiRequest(routerId ? `/api/openwrt/routers/${routerId}` : '/api/openwrt/routers', { method: routerId ? 'PATCH' : 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(values) }); if (!routerId && response.agentToken) { alert(`Router Registered Successfully!\n\nRouter ID: ${response.routerId}\nSerial Number: ${response.serialNumber}\nAgent Token: ${response.agentToken}\n\nSAVE THIS AGENT TOKEN NOW! It is shown only once.`); } else { alert(response.message || 'Router updated.'); } state.routerFormTarget = null; await loadDashboard(); await loadOpenWrtRouters(); renderAdmin(); } catch (err) { alert(err.message); } }
-async function deleteRouterItem(routerId) { confirmAction('Delete this OpenWrt router? Devices linked to this router will be unlinked.', async () => { try { const response = await apiRequest(`/api/openwrt/routers/${routerId}`, { method: 'DELETE', headers: authHeaders() }); alert(response.message); await loadOpenWrtRouters(); renderAdmin(); } catch (err) { alert(err.message); } }); }
+async function deleteRouterItem(routerId) { confirmAction('Delete this OpenWrt router? Devices linked to this router will be unlinked.', async () => { try { const response = await apiRequest(`/api/openwrt/routers/${routerId}`, { method: 'DELETE', headers: authHeaders() }); alert(response.message); if (state.selected?.id === routerId) state.selected = null; await loadOpenWrtRouters(); renderAdmin(); } catch (err) { alert(err.message); } }); }
 async function allowUser(e) { e.preventDefault(); const p = Object.fromEntries(new FormData(e.currentTarget)); try { await apiRequest(`/api/devices/${p.deviceId}/allow-user`, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ userId: p.userId }) }); alert('Access granted.'); await loadDashboard(); } catch (err) { alert(err.message); } }
 async function addLocation(e) { e.preventDefault(); const p = Object.fromEntries(new FormData(e.currentTarget)); const target = state.locationFormTarget; try { await apiRequest(target ? `/api/locations/${target.id}` : '/api/locations', { method: target ? 'PATCH' : 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(p) }); state.locationFormTarget = null; await loadDashboard(); navigate('locations'); } catch (err) { alert(err.message); } }
 async function addDevice(e) { e.preventDefault(); const p = Object.fromEntries(new FormData(e.currentTarget)); const deviceId = e.currentTarget.dataset.editingDevice; try { const res = await apiRequest(deviceId ? `/api/devices/${deviceId}` : '/api/devices', { method: deviceId ? 'PATCH' : 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(p) }); if (!deviceId && res.routerId) { alert(`Device Registered Successfully!\n\nDevice Name: ${p.name}\nRouter ID: ${res.routerId}${res.agentToken ? `\nAgent Token: ${res.agentToken}\n\nSAVE THIS AGENT TOKEN NOW! It is shown only once.` : ''}`); } else { alert(res.message || (deviceId ? 'Device updated.' : 'Device added.')); } state.editingDevice = null; await loadDashboard(); navigate('devices'); } catch (err) { alert(err.message); } }
@@ -134,7 +530,7 @@ function renderUserPage() { const d = state.userData; const meta = { locations: 
 async function loadNotifications(showPopup = true) { if (!state.token || !state.data) return; try { const response = await apiRequest('/api/notifications', { headers: authHeaders() }); state.notifications = response.notifications || []; const pending = state.notifications.filter((n) => n.status === 'unread'); $('#notificationCount').textContent = pending.length; if (state.page === 'notifications') renderAdmin(); const request = pending.find((n) => n.type === 'connection_request'); if (showPopup && request) showNotificationPopup(request); } catch (_) { } }
 function showNotificationPopup(notification) { const modal = $('#notificationModal'); const overconsumption = notification.type === 'overconsumption'; $('.modal-card h3').textContent = overconsumption ? 'Data Usage Alert' : 'New Connection Request'; $('#notificationModalText').textContent = notification.message; $('#notificationAllowBtn').textContent = overconsumption ? 'Allow Further' : 'Allow'; $('#notificationDenyBtn').textContent = overconsumption ? 'Disconnect' : "Don't Allow"; $('#notificationAllowBtn').onclick = () => respondToNotification(notification.id, overconsumption ? 'continue' : 'allow'); $('#notificationDenyBtn').onclick = () => respondToNotification(notification.id, overconsumption ? 'disconnect' : 'deny'); modal.classList.remove('hidden'); }
 async function respondToNotification(id, action) { try { await apiRequest(`/api/notifications/${id}/respond`, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ action, allow: action === 'allow' }) }); $('#notificationModal').classList.add('hidden'); await loadDashboard(); } catch (e) { alert(e.message); } }
-async function loadDashboard() { try { const profile = await apiRequest('/api/profile', { headers: authHeaders() }); if (profile.user.role === 'user') return renderUserDashboard(await apiRequest('/api/user-dashboard', { headers: authHeaders() })); state.data = await apiRequest('/api/dashboard', { headers: authHeaders() }); $('#authSection').classList.add('hidden'); $('#dashboard').classList.remove('hidden'); $('#userDashboard').classList.add('hidden'); $('#locationCount').textContent = state.data.stats.totalLocations; $('#deviceCount').textContent = state.data.stats.totalDevices; $('#userCount').textContent = state.data.users.filter((user) => user.role !== 'super_admin').length; state.page = location.hash.slice(1) || (profile.user.role === 'super_admin' ? 'users' : 'overview'); if (!pageMeta(state.page) || (state.page === 'super-admin' && profile.user.role !== 'super_admin')) state.page = profile.user.role === 'super_admin' ? 'users' : 'overview'; if (state.page === 'super-admin') state.page = 'users'; await loadNotifications(); await loadOpenWrtRouters(); if (profile.user.role === 'super_admin') await loadSuperAdmins(); renderAdmin(); } catch (e) { logout(); alert(e.message); } }
+async function loadDashboard() { try { const profile = await apiRequest('/api/profile', { headers: authHeaders() }); if (profile.user.role === 'user') return renderUserDashboard(await apiRequest('/api/user-dashboard', { headers: authHeaders() })); state.data = await apiRequest('/api/dashboard', { headers: authHeaders() }); $('#authSection').classList.add('hidden'); $('#dashboard').classList.remove('hidden'); $('#userDashboard').classList.add('hidden'); $('#locationCount').textContent = state.data.stats.totalLocations; $('#deviceCount').textContent = state.data.stats.totalDevices; await loadNotifications(); await loadOpenWrtRouters(); const extraClients = (state.routers || []).flatMap((r) => r.clients || []).filter((cl) => { const mac = (cl.mac || '').toLowerCase(); return !state.data.users.some((u) => (u.email || '').toLowerCase() === mac || u.id === 'user-mac-' + mac.replace(/[^a-z0-9]/g, '')); }); $('#userCount').textContent = state.data.users.filter((user) => user.role !== 'super_admin').length + extraClients.length; state.page = location.hash.slice(1) || (profile.user.role === 'super_admin' ? 'users' : 'overview'); if (!pageMeta(state.page) || (state.page === 'super-admin' && profile.user.role !== 'super_admin')) state.page = profile.user.role === 'super_admin' ? 'users' : 'overview'; if (state.page === 'super-admin') state.page = 'users'; if (profile.user.role === 'super_admin') await loadSuperAdmins(); renderAdmin(); } catch (e) { logout(); alert(e.message); } }
 async function login(e, endpoint) { e.preventDefault(); try { const data = await apiRequest(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.fromEntries(new FormData(e.currentTarget))) }); state.token = data.token; localStorage.setItem('secmynet-token', state.token); await loadDashboard(); } catch (err) { alert(err.message); } }
 async function register(e) { e.preventDefault(); const form = e.currentTarget; const values = Object.fromEntries(new FormData(form)); const error = $('#passwordError'); if (values.password !== values.confirmPassword) { error.textContent = 'Passwords do not match.'; $('#confirmPassword').focus(); return; } error.textContent = ''; delete values.confirmPassword; try { const data = await apiRequest('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) }); state.token = data.token; localStorage.setItem('secmynet-token', state.token); await loadDashboard(); } catch (err) { alert(err.message); } }
 function togglePassword(id, button) { const input = $(`#${id}`); const isVisible = input.type === 'text'; input.type = isVisible ? 'password' : 'text'; button.setAttribute('aria-label', `${isVisible ? 'Show' : 'Hide'} ${id === 'confirmPassword' ? 'confirm password' : 'password'}`); button.title = button.getAttribute('aria-label'); }

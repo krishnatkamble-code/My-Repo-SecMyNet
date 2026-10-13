@@ -4,6 +4,7 @@
 
 . /etc/secmynet-agent.conf
 
+SECMYNET_URL="${SECMYNET_URL%/}"
 [ -n "$SECMYNET_URL" ] && [ -n "$SECMYNET_ROUTER_ID" ] && [ -n "$SECMYNET_AGENT_TOKEN" ] || exit 1
 
 clients="$(ubus call iwinfo devices 2>/dev/null | jsonfilter -e '@.devices[*]' | while read -r radio; do
