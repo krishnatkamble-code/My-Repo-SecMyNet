@@ -1,4 +1,4 @@
 # Must use HTTPS in production. Prefer an outbound WireGuard tunnel from router to server.
 SECMYNET_URL="https://my-repo-sec-my-net.vercel.app/"
 SECMYNET_ROUTER_ID="931354"
-SECMYNET_AGENT_TOKEN="Yc-zaE2xRWz16nH0TH68adxS4ZSnu4sfbSMmIU4OxJE"
+SECMYNET_AGENT_TOKEN="xMhPB3WAq2_Ys-BOeBdjFqSf27Z2xAtksJj-KXkD0zE"
