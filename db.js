@@ -182,6 +182,11 @@ async function initSqliteDb() {
   } catch (error) {
     // Existing databases already have this column.
   }
+  try {
+    sqliteDb.run("ALTER TABLE devices ADD COLUMN wifi_password TEXT DEFAULT ''");
+  } catch (error) {
+    // Existing databases already have this column.
+  }
 
   sqliteDb.run(`CREATE TABLE IF NOT EXISTS connections (
     id TEXT PRIMARY KEY,
@@ -202,12 +207,18 @@ async function initSqliteDb() {
     location_id TEXT,
     status TEXT NOT NULL DEFAULT 'unread',
     expires_at TEXT,
+    min_quarantine_until TEXT,
     created_at TEXT NOT NULL
   );`);
   try {
     sqliteDb.run("ALTER TABLE notifications ADD COLUMN expires_at TEXT");
   } catch (err) {
     // Column likely already exists or SQLite version doesn't support IF NOT EXISTS — ignore error
+  }
+  try {
+    sqliteDb.run("ALTER TABLE notifications ADD COLUMN min_quarantine_until TEXT");
+  } catch (err) {
+    // Column already exists
   }
 
   sqliteDb.run(`CREATE TABLE IF NOT EXISTS openwrt_routers (
@@ -396,6 +407,7 @@ async function initDb() {
     await safePgQuery("ALTER TABLE devices ADD COLUMN IF NOT EXISTS ip_address TEXT NOT NULL DEFAULT ''");
     await safePgQuery("ALTER TABLE devices ADD COLUMN IF NOT EXISTS router_id TEXT");
     await safePgQuery("ALTER TABLE devices ADD COLUMN IF NOT EXISTS serial_number TEXT");
+    await safePgQuery("ALTER TABLE devices ADD COLUMN IF NOT EXISTS wifi_password TEXT DEFAULT ''");
 
     await safePgQuery(`
       CREATE TABLE IF NOT EXISTS connections (
@@ -419,12 +431,14 @@ async function initDb() {
         location_id TEXT,
         status TEXT NOT NULL DEFAULT 'unread',
         expires_at TIMESTAMPTZ,
+        min_quarantine_until TIMESTAMPTZ,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
     `);
 
-    // Ensure expires_at exists for older DBs
+    // Ensure expires_at and min_quarantine_until exist for older DBs
     await safePgQuery("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ");
+    await safePgQuery("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS min_quarantine_until TIMESTAMPTZ");
 
     await safePgQuery(`
       CREATE TABLE IF NOT EXISTS openwrt_routers (

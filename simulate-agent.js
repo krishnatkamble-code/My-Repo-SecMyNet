@@ -85,6 +85,7 @@ async function main() {
   }
 
   // Simulated clients
+  const isQuarantineTest = process.argv.includes('--new-client') || process.argv.includes('--quarantine');
   const mockClients = [
     {
       mac: '50:eb:f6:12:34:56',
@@ -112,6 +113,25 @@ async function main() {
     }
   ];
 
+  const isReturningTest = process.argv.includes('--returning-client');
+
+  if (isQuarantineTest) {
+    const randomHex = Math.floor(Math.random() * 899 + 100).toString();
+    mockClients.push({
+      mac: `fa:99:11:22:33:${randomHex.slice(-2)}`,
+      ip: '192.168.1.199',
+      hostname: 'New-Guest-Device',
+      rx_bytes: 409600,
+      tx_bytes: 204800,
+      signal: -58
+    });
+    console.log(`\n🚨 SIMULATION: Added brand new device [New-Guest-Device, MAC: fa:99:11:22:33:${randomHex.slice(-2)}] to test Quarantine-First enforcement!`);
+  }
+
+  if (isReturningTest) {
+    console.log(`\n🔄 SIMULATION: Posting telemetry for returning client [Krishnas-iPhone, MAC: 50:eb:f6:12:34:56] to test returning user quarantine and past history logging!`);
+  }
+
   console.log(`Posting telemetry with ${mockClients.length} clients to router ${routerId}...`);
   const telemetryRes = await request(`/api/openwrt/routers/${routerId}/telemetry`, {
     method: 'POST',
@@ -126,14 +146,40 @@ async function main() {
   });
 
   if (telemetryRes.status === 200 || telemetryRes.status === 201) {
-    console.log('\n SUCCESS: Telemetry posted successfully!');
+    console.log('\n✅ SUCCESS: Telemetry posted successfully!');
     console.log(`- Router ID: ${routerId}`);
     console.log(`- Status: Online`);
     console.log(`- Active Clients Reported: ${mockClients.length}`);
-    console.log(`- Total Bandwidth: ~1,026 MB`);
-    console.log('\nOpen your browser at http://localhost:3000/#routers and click "Details" to view live user and usage data!');
+
+    // Poll command queue
+    console.log('\nChecking OpenWrt router command queue from SecMyNet server...');
+    const cmdRes = await request(`/api/openwrt/routers/${routerId}/commands`, {
+      headers: { 'X-SecMyNet-Agent-Token': agentToken }
+    });
+
+    const commands = cmdRes.body.commands || [];
+    if (commands.length) {
+      console.log(`📬 Received ${commands.length} queued command(s) from server:`);
+      for (const cmd of commands) {
+        console.log(`   - [Command ${cmd.id}] Type: ${cmd.command_type.toUpperCase()} | Payload:`, cmd.payload);
+        // Acknowledge command completion
+        await request(`/api/openwrt/routers/${routerId}/commands/${cmd.id}/complete`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-SecMyNet-Agent-Token': agentToken
+          },
+          body: { success: true }
+        });
+        console.log(`     -> Marked command ${cmd.id} as completed on router.`);
+      }
+    } else {
+      console.log('ℹ️ No pending commands in router queue.');
+    }
+
+    console.log('\nOpen your browser at http://localhost:3000/#overview or #notifications to inspect the active quarantine hold and approvals!');
   } else {
-    console.error(' Telemetry post failed with code:', telemetryRes.status, telemetryRes.body);
+    console.error('❌ Telemetry post failed with code:', telemetryRes.status, telemetryRes.body);
   }
 }
 

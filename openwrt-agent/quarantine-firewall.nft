@@ -1,0 +1,18 @@
+# /etc/nftables.d/secmynet-quarantine.nft
+# SecMyNet Quarantine-First Firewall Rules for OpenWrt fw4 (nftables)
+#
+# Dropped WAN forwarding for all MAC addresses in the secmynet_quarantine set.
+# Devices in this set can communicate with DHCP/DNS on the router, but cannot access the Internet.
+
+table inet fw4 {
+    set secmynet_quarantine {
+        type ether_addr
+        flags interval
+        comment "SecMyNet quarantined MAC addresses pending owner approval"
+    }
+
+    chain secmynet_quarantine_forward {
+        type filter hook forward priority -5; policy accept;
+        ether saddr @secmynet_quarantine drop
+    }
+}

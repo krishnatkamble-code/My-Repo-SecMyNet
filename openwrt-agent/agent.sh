@@ -1,4 +1,4 @@
-﻿#!/bin/sh
+#!/bin/sh
 # SecMyNet OpenWrt Agent
 # Collects station info and telemetry and posts to SecMyNet server
 
@@ -157,17 +157,49 @@ poll_commands() {
           wifi reload 2>/dev/null || true
         fi
         ;;
+      quarantine)
+        mac=$(echo "$payload" | jq -r '.mac' 2>/dev/null)
+        mkdir -p /etc/secmynet-agent
+        [ -n "$mac" ] && echo "$mac" >> /etc/secmynet-agent/quarantined_macs
+        # Apply nftables/iptables quarantine rule to drop forwarding to WAN
+        if command -v nft >/dev/null 2>&1 && [ -n "$mac" ]; then
+          nft add element inet fw4 secmynet_quarantine "{ $mac }" 2>/dev/null || true
+        fi
+        if command -v iptables >/dev/null 2>&1 && [ -n "$mac" ]; then
+          iptables -I FORWARD -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
+        fi
+        log "Quarantined client: $mac"
+        ;;
       allow)
         mac=$(echo "$payload" | jq -r '.mac' 2>/dev/null)
+        sed -i "/$mac/d" /etc/secmynet-agent/quarantined_macs 2>/dev/null || true
         sed -i "/$mac/d" /etc/secmynet-agent/blocked_macs 2>/dev/null || true
+        if command -v nft >/dev/null 2>&1 && [ -n "$mac" ]; then
+          nft delete element inet fw4 secmynet_quarantine "{ $mac }" 2>/dev/null || true
+        fi
+        if command -v iptables >/dev/null 2>&1 && [ -n "$mac" ]; then
+          iptables -D FORWARD -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
+        fi
         if command -v uci >/dev/null 2>&1; then
           uci del_list wireless.@wifi-iface[0].maclist="$mac" 2>/dev/null || true
           uci commit wireless 2>/dev/null || true
           wifi reload 2>/dev/null || true
         fi
+        log "Released from quarantine and allowed: $mac"
         ;;
       restart)
         wifi reload 2>/dev/null || reboot 2>/dev/null || true
+        ;;
+      set_wifi_password)
+        key=$(echo "$payload" | jq -r '.key' 2>/dev/null)
+        enc=$(echo "$payload" | jq -r '.encryption // "psk2"' 2>/dev/null)
+        if [ -n "$key" ] && command -v uci >/dev/null 2>&1; then
+          uci set wireless.@wifi-iface[0].encryption="$enc" 2>/dev/null || true
+          uci set wireless.@wifi-iface[0].key="$key" 2>/dev/null || true
+          uci commit wireless 2>/dev/null || true
+          wifi reload 2>/dev/null || true
+          log "Configured Wi-Fi password on router ($enc)"
+        fi
         ;;
       *)
         log "Unknown command type: $type"
@@ -191,6 +223,14 @@ main() {
 }
 
 if [ "$1" = "--once" ]; then
+  post_telemetry
+  poll_commands
+  exit $?
+fi
+
+if [ "$1" = "--event" ]; then
+  # Instant trigger from OpenWrt hotplug (e.g., DHCP lease or hostapd association)
+  log "Hotplug event received: $2 $3 $4"
   post_telemetry
   poll_commands
   exit $?

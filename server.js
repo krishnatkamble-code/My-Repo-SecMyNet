@@ -317,29 +317,30 @@ async function routerAgentRequired(req, res, next) {
   next();
 }
 
-async function createNotification({ type, message, userId = null, deviceId = null, locationId = null, quarantineSeconds = 10 }) {
+async function createNotification({ type, message, userId = null, deviceId = null, locationId = null, quarantineSeconds = 45, maxQuarantineSeconds = 300 }) {
   await ensureDb();
   const id = makeId('notification');
   const now = new Date().toISOString();
-  const expiresAt = type === 'connection_request' ? new Date(Date.now() + (quarantineSeconds || 10) * 1000).toISOString() : null;
+  const minQuarantineUntil = type === 'connection_request' ? new Date(Date.now() + (quarantineSeconds || 45) * 1000).toISOString() : null;
+  const expiresAt = type === 'connection_request' ? new Date(Date.now() + (maxQuarantineSeconds || 300) * 1000).toISOString() : null;
   const status = type === 'connection_request' ? 'quarantine' : 'unread';
 
   await run(
-    `INSERT INTO notifications (id, type, message, user_id, device_id, location_id, status, expires_at, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [id, type, message, userId, deviceId, locationId, status, expiresAt, now]
+    `INSERT INTO notifications (id, type, message, user_id, device_id, location_id, status, expires_at, min_quarantine_until, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+    [id, type, message, userId, deviceId, locationId, status, expiresAt, minQuarantineUntil, now]
   );
 
-  // For connection requests, notify admins via FCM (and SMS fallback) and start a short-lived quarantine
+  // For connection requests, notify admins via FCM (and SMS fallback) and start a quarantine
   if (type === 'connection_request') {
     try {
       // find admin push tokens
       const tokens = await all(`SELECT pt.device_token FROM push_tokens pt JOIN users u ON u.id = pt.user_id WHERE u.role = $1`, ['admin']);
       const tokenList = (tokens || []).map((t) => t.device_token).filter(Boolean);
       const payload = {
-        title: 'Connection request',
+        title: 'New Device Quarantined',
         body: message,
-        data: { notificationId: id, deviceId: deviceId, userId: userId }
+        data: { notificationId: id, deviceId: deviceId, userId: userId, minQuarantineUntil, expiresAt }
       };
       if (tokenList.length) {
         await sendFcm(tokenList, payload);
@@ -348,28 +349,99 @@ async function createNotification({ type, message, userId = null, deviceId = nul
       // SMS fallback: send to admin contacts who opted in
       const phones = await all(`SELECT phone FROM admin_contacts ac JOIN users u ON u.id = ac.user_id WHERE ac.sms_opt_in = 1 AND u.role = $1`, ['admin']);
       for (const p of phones || []) {
-        if (p.phone) await sendSms(p.phone, `Connection request: ${message}`);
+        if (p.phone) await sendSms(p.phone, `Quarantine Alert: ${message}`);
       }
     } catch (err) {
       console.error('Error sending admin notifications', err);
     }
-
-    // schedule a timeout to check quarantine state after the window
-    setTimeout(async () => {
-      try {
-        const n = await get('SELECT * FROM notifications WHERE id = $1', [id]);
-        if (!n) return;
-        if (n.status === 'quarantine') {
-          // No admin action within quarantine window. Keep it quarantined for manual review.
-          console.log(`Notification ${id} remains in quarantine`);
-        }
-      } catch (err) {
-        console.error('quarantine timeout check failed', err);
-      }
-    }, (quarantineSeconds || 10) * 1000);
   }
 
   return id;
+}
+
+// Release quarantined device: add user to allowed list, update connection to connected, and queue 'allow' command to router
+async function releaseQuarantinedDevice(notificationId) {
+  const notification = await get('SELECT * FROM notifications WHERE id = $1', [notificationId]);
+  if (!notification) return false;
+
+  const device = await get('SELECT * FROM devices WHERE id = $1', [notification.device_id]);
+  if (device) {
+    const allowedUsers = parseAllowedUsers(device.allowed_user_ids);
+    if (!allowedUsers.includes(notification.user_id)) {
+      allowedUsers.push(notification.user_id);
+      await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(allowedUsers), device.id]);
+    }
+
+    const existingConn = await get(
+      "SELECT id FROM connections WHERE device_id = $1 AND user_id = $2 AND status IN ('quarantine', 'connected') ORDER BY connected_at DESC LIMIT 1",
+      [device.id, notification.user_id]
+    );
+    if (existingConn) {
+      await run("UPDATE connections SET status = 'connected', disconnected_at = NULL WHERE id = $1", [existingConn.id]);
+    } else {
+      await run(
+        `INSERT INTO connections (id, device_id, user_id, status, data_used_mb, connected_at, disconnected_at)
+         VALUES ($1, $2, $3, 'connected', 0, NOW(), NULL)`,
+        [makeId('connection'), device.id, notification.user_id]
+      );
+    }
+
+    if (device.router_id) {
+      let mac = '';
+      if (notification.user_id && notification.user_id.startsWith('user-mac-')) {
+        const raw = notification.user_id.replace('user-mac-', '');
+        mac = raw.match(/.{1,2}/g)?.join(':') || '';
+      }
+      await run(
+        `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+         VALUES ($1, $2, 'allow', $3, 'queued', NOW())`,
+        [makeId('openwrt-command'), device.router_id, JSON.stringify({ mac })]
+      );
+    }
+  }
+
+  await run("UPDATE notifications SET status = 'allowed' WHERE id = $1", [notification.id]);
+  console.log(`Device for notification ${notificationId} successfully released from quarantine.`);
+  return true;
+}
+
+// Deny and disconnect device: remove from allowed, mark disconnected, and queue disconnect+block to router
+async function denyAndDisconnectDevice(notificationId, reason = 'denied') {
+  const notification = await get('SELECT * FROM notifications WHERE id = $1', [notificationId]);
+  if (!notification) return false;
+
+  const device = await get('SELECT * FROM devices WHERE id = $1', [notification.device_id]);
+  if (device) {
+    const allowedUsers = parseAllowedUsers(device.allowed_user_ids).filter(uid => uid !== notification.user_id);
+    await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(allowedUsers), device.id]);
+
+    await run(
+      "UPDATE connections SET status = 'disconnected', disconnected_at = NOW() WHERE device_id = $1 AND user_id = $2 AND status IN ('quarantine', 'connected')",
+      [device.id, notification.user_id]
+    );
+
+    if (device.router_id) {
+      let mac = '';
+      if (notification.user_id && notification.user_id.startsWith('user-mac-')) {
+        const raw = notification.user_id.replace('user-mac-', '');
+        mac = raw.match(/.{1,2}/g)?.join(':') || '';
+      }
+      await run(
+        `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+         VALUES ($1, $2, 'disconnect', $3, 'queued', NOW())`,
+        [makeId('openwrt-command'), device.router_id, JSON.stringify({ mac })]
+      );
+      await run(
+        `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+         VALUES ($1, $2, 'block', $3, 'queued', NOW())`,
+        [makeId('openwrt-command'), device.router_id, JSON.stringify({ mac })]
+      );
+    }
+  }
+
+  await run("UPDATE notifications SET status = $1 WHERE id = $2", [reason, notification.id]);
+  console.log(`Device for notification ${notificationId} denied/disconnected. Reason: ${reason}`);
+  return true;
 }
 
 // Process telemetry from OpenWrt agents: persist per-client usage records so the
@@ -458,43 +530,115 @@ async function processTelemetry(routerId, clients = [], usage = []) {
           }
         }
 
-        // Ensure user is in device's allowed_user_ids
-        const allowed = parseAllowedUsers(device.allowed_user_ids);
-        if (!allowed.includes(userId)) {
-          allowed.push(userId);
-          await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(allowed), device.id]);
-        }
-
+        // Check if client is ALREADY actively connected in an approved session
         const activeConn = await get(
           "SELECT * FROM connections WHERE device_id = $1 AND user_id = $2 AND status = 'connected' LIMIT 1",
           [device.id, userId]
         );
 
         if (activeConn) {
+          // Ongoing active session approved by owner; update data consumption
           await run(
             'UPDATE connections SET data_used_mb = $1 WHERE id = $2',
             [totalMb, activeConn.id]
           );
         } else {
-          const connId = makeId('connection');
-          await run(
-            `INSERT INTO connections (id, device_id, user_id, status, data_used_mb, connected_at)
-             VALUES ($1, $2, $3, 'connected', $4, NOW())`,
-            [connId, device.id, userId, totalMb]
+          // Zero-Trust Quarantine-First for ALL connecting clients (new or returning):
+          // Maintain a quarantine connection row for this new session
+          const quarantineConn = await get(
+            "SELECT * FROM connections WHERE device_id = $1 AND user_id = $2 AND status = 'quarantine' LIMIT 1",
+            [device.id, userId]
           );
+
+          if (quarantineConn) {
+            await run(
+              'UPDATE connections SET data_used_mb = $1 WHERE id = $2',
+              [totalMb, quarantineConn.id]
+            );
+          } else {
+            const connId = makeId('connection');
+            await run(
+              `INSERT INTO connections (id, device_id, user_id, status, data_used_mb, connected_at)
+               VALUES ($1, $2, $3, 'quarantine', $4, NOW())`,
+              [connId, device.id, userId, totalMb]
+            );
+          }
+
+          // Check if pending notification already exists in quarantine, quarantine_wait, or approved_holding
+          const existingPendingNotification = await get(
+            "SELECT id FROM notifications WHERE type = 'connection_request' AND user_id = $1 AND device_id = $2 AND status IN ('quarantine', 'quarantine_wait', 'approved_holding')",
+            [userId, device.id]
+          );
+
+          if (!existingPendingNotification) {
+            // Retrieve all past completed sessions from database to build connection history
+            const pastSessions = await all(
+              "SELECT * FROM connections WHERE user_id = $1 AND status = 'disconnected' ORDER BY connected_at DESC",
+              [userId]
+            );
+
+            let notifMessage = '';
+            if (pastSessions && pastSessions.length > 0) {
+              const visitCount = pastSessions.length + 1;
+              const lastConn = pastSessions[0];
+              const lastConnectedStr = lastConn.connected_at ? new Date(lastConn.connected_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Unknown';
+              const lastDisconnectedStr = lastConn.disconnected_at ? new Date(lastConn.disconnected_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : null;
+              const totalPastMb = pastSessions.reduce((sum, c) => sum + Number(c.data_used_mb || 0), 0).toFixed(2);
+              const lastSessionMb = Number(lastConn.data_used_mb || 0).toFixed(2);
+
+              let histDetails = `Visit #${visitCount} · Last logged: ${lastConnectedStr}`;
+              if (lastDisconnectedStr) histDetails += ` (left: ${lastDisconnectedStr})`;
+              histDetails += ` · Last session: ${lastSessionMb} MB · Total past usage: ${totalPastMb} MB across ${pastSessions.length} session${pastSessions.length === 1 ? '' : 's'}`;
+
+              notifMessage = `Returning user detected: ${displayName} [${mac}]. (${histDetails}). Quarantined pending owner approval.`;
+            } else {
+              notifMessage = `New device detected: ${displayName} [${mac}]. Quarantined pending owner approval.`;
+            }
+
+            await createNotification({
+              type: 'connection_request',
+              message: notifMessage,
+              userId,
+              deviceId: device.id,
+              locationId: device.location_id,
+              quarantineSeconds: 45,
+              maxQuarantineSeconds: 300
+            });
+
+            // Instruct router agent to keep client quarantined at firewall level
+            await run(
+              `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+               VALUES ($1, $2, 'quarantine', $3, 'queued', NOW())`,
+              [makeId('openwrt-command'), routerId, JSON.stringify({ mac, ip })]
+            );
+          }
         }
       }
     }
 
     // Disconnect stale router clients if no longer in station dump
-    if (device && activeUserIds.length > 0) {
+    if (device) {
       const activeMacConns = await all(
-        "SELECT id, user_id FROM connections WHERE device_id = $1 AND status = 'connected' AND user_id LIKE 'user-mac-%'",
+        "SELECT id, user_id FROM connections WHERE device_id = $1 AND status IN ('connected', 'quarantine') AND user_id LIKE 'user-mac-%'",
         [device.id]
       );
       for (const conn of activeMacConns || []) {
         if (!activeUserIds.includes(conn.user_id)) {
           await run("UPDATE connections SET status = 'disconnected', disconnected_at = NOW() WHERE id = $1", [conn.id]);
+
+          // Clear client from allowed_user_ids so their next connection triggers quarantine again
+          const currentAllowed = parseAllowedUsers(device.allowed_user_ids);
+          if (currentAllowed.includes(conn.user_id)) {
+            const updatedAllowed = currentAllowed.filter((uid) => uid !== conn.user_id);
+            await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(updatedAllowed), device.id]);
+            device.allowed_user_ids = JSON.stringify(updatedAllowed);
+          }
+
+          // Mark unapproved pending notifications as disconnected
+          await run(
+            "UPDATE notifications SET status = 'disconnected' WHERE device_id = $1 AND user_id = $2 AND status IN ('quarantine', 'quarantine_wait', 'approved_holding')",
+            [device.id, conn.user_id]
+          );
         }
       }
     }
@@ -506,24 +650,40 @@ async function processTelemetry(routerId, clients = [], usage = []) {
 async function reconcileQuarantines() {
   await ensureDb();
   try {
-    const now = new Date().toISOString();
-    const rows = await all("SELECT * FROM notifications WHERE status = $1 AND expires_at IS NOT NULL AND expires_at <= $2", ['quarantine', now]);
-    for (const n of rows || []) {
+    const now = new Date();
+    const nowIso = now.toISOString();
+
+    // 1. Release devices that were approved by owner but were waiting for mandatory 45s hold
+    const holdingRows = await all(
+      "SELECT * FROM notifications WHERE status = 'approved_holding' AND min_quarantine_until IS NOT NULL AND min_quarantine_until <= $1",
+      [nowIso]
+    );
+    for (const n of holdingRows || []) {
+      console.log(`Mandatory 45s quarantine hold completed for notification ${n.id}. Releasing client.`);
+      await releaseQuarantinedDevice(n.id);
+    }
+
+    // 2. Auto-disconnect clients that exceeded 5 minutes (300s) in quarantine without approval
+    const expiredRows = await all(
+      "SELECT * FROM notifications WHERE status IN ('quarantine', 'quarantine_wait') AND expires_at IS NOT NULL AND expires_at <= $1",
+      [nowIso]
+    );
+    for (const n of expiredRows || []) {
+      console.log(`Quarantine 5-minute timeout reached for notification ${n.id}. Auto-disconnecting client.`);
+      await denyAndDisconnectDevice(n.id, 'quarantine_auto_denied');
+
+      // notify admins that quarantine timed out and device was auto-disconnected
       try {
-        // mark as expired so it survives restarts and is visible for manual review
-        await run("UPDATE notifications SET status = $1 WHERE id = $2", ['quarantine_expired', n.id]);
-        console.log(`Notification ${n.id} moved to quarantine_expired`);
-        // notify admins that a quarantine expired and needs action
         const tokens = await all(`SELECT pt.device_token FROM push_tokens pt JOIN users u ON u.id = pt.user_id WHERE u.role = $1`, ['admin']);
         const tokenList = (tokens || []).map((t) => t.device_token).filter(Boolean);
         const payload = {
-          title: 'Quarantine expired',
-          body: `Connection request expired: ${n.message}`,
+          title: 'Quarantine Timeout (Auto-Disconnected)',
+          body: `Client timed out after 5 minutes in quarantine and was disconnected: ${n.message}`,
           data: { notificationId: n.id, deviceId: n.device_id }
         };
         if (tokenList.length) await sendFcm(tokenList, payload);
       } catch (err) {
-        console.error('Failed to process expired quarantine', err);
+        console.error('Failed to send timeout notification', err);
       }
     }
   } catch (err) {
@@ -531,10 +691,10 @@ async function reconcileQuarantines() {
   }
 }
 
-// Run reconciliation periodically to ensure quarantines are handled after restarts
+// Run reconciliation periodically (every 5 seconds) to ensure quarantines and releases are handled promptly
 const quarantineReconciliationTimer = setInterval(() => {
   reconcileQuarantines().catch(err => console.error('reconcileQuarantines top-level error', err));
-}, 10 * 1000);
+}, 5 * 1000);
 quarantineReconciliationTimer.unref();
 
 app.get('/api/health', async (_req, res) => {
@@ -1301,8 +1461,8 @@ app.post('/api/openwrt/routers/:routerId/reset-token', authRequired, adminRequir
 
 app.post('/api/openwrt/routers/:routerId/commands', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
-  const { commandType, mac, ip } = req.body;
-  const validCommands = ['disconnect', 'block', 'allow', 'restart'];
+  const { commandType, mac, ip, key, encryption } = req.body;
+  const validCommands = ['disconnect', 'block', 'allow', 'restart', 'quarantine', 'set_wifi_password'];
   if (!validCommands.includes(commandType)) return res.status(400).json({ message: 'Unsupported router command.' });
   const router = await get('SELECT id FROM openwrt_routers WHERE id = $1', [req.params.routerId]);
   if (!router) return res.status(404).json({ message: 'OpenWrt router not found.' });
@@ -1310,7 +1470,7 @@ app.post('/api/openwrt/routers/:routerId/commands', authRequired, adminRequired,
   await run(
     `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
      VALUES ($1, $2, $3, $4, $5, NOW())`,
-    [commandId, router.id, commandType, JSON.stringify({ mac: mac || '', ip: ip || '' }), 'queued']
+    [commandId, router.id, commandType, JSON.stringify({ mac: mac || '', ip: ip || '', key: key || '', encryption: encryption || 'psk2' }), 'queued']
   );
   res.status(201).json({ message: 'Command queued for the OpenWrt agent.', commandId });
 });
@@ -1345,25 +1505,52 @@ app.post('/api/notifications/:notificationId/respond', authRequired, adminRequir
   await ensureDb();
   const { allow, action } = req.body;
   const notification = await get('SELECT * FROM notifications WHERE id = $1', [req.params.notificationId]);
-  if (!notification || (notification.status !== 'unread' && notification.status !== 'quarantine')) {
+  if (!notification || !['unread', 'quarantine', 'quarantine_wait', 'approved_holding'].includes(notification.status)) {
     return res.status(404).json({ message: 'Pending connection request not found.' });
   }
 
-  if (notification.type === 'connection_request' && (allow || action === 'allow')) {
-    const device = await get('SELECT * FROM devices WHERE id = $1', [notification.device_id]);
-    const allowedUsers = parseAllowedUsers(device.allowed_user_ids);
-    if (!allowedUsers.includes(notification.user_id)) allowedUsers.push(notification.user_id);
-    await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(allowedUsers), device.id]);
-    await run(
-      `INSERT INTO connections (id, device_id, user_id, status, data_used_mb, connected_at, disconnected_at)
-       VALUES ($1, $2, $3, $4, $5, NOW(), NULL)`,
-      [makeId('connection'), device.id, notification.user_id, 'connected', 0]
-    );
-  }
   if (notification.type === 'connection_request') {
-    const approved = allow || action === 'allow';
-    await run('UPDATE notifications SET status = $1 WHERE id = $2', [approved ? 'allowed' : 'denied', notification.id]);
-    return res.json({ message: approved ? 'User allowed and connected.' : 'Connection request denied.' });
+    if (action === 'wait') {
+      const newExpiresAt = new Date(Date.now() + 300 * 1000).toISOString();
+      await run("UPDATE notifications SET status = 'quarantine_wait', expires_at = $1 WHERE id = $2", [newExpiresAt, notification.id]);
+      return res.json({
+        message: 'Owner requested time to verify identity. Quarantine extended for up to 5 minutes.',
+        status: 'quarantine_wait',
+        expiresAt: newExpiresAt
+      });
+    }
+
+    if (allow || action === 'allow') {
+      const minHoldTime = notification.min_quarantine_until ? new Date(notification.min_quarantine_until).getTime() : 0;
+      const nowTime = Date.now();
+      const remainingMs = minHoldTime - nowTime;
+
+      if (remainingMs > 0) {
+        const remainingSec = Math.ceil(remainingMs / 1000);
+        await run("UPDATE notifications SET status = 'approved_holding' WHERE id = $1", [notification.id]);
+        const holdTimer = setTimeout(async () => {
+          try {
+            await releaseQuarantinedDevice(notification.id);
+          } catch (e) {
+            console.error('Failed to release device after 45s hold', e);
+          }
+        }, remainingMs);
+        if (holdTimer && typeof holdTimer.unref === 'function') holdTimer.unref();
+
+        return res.json({
+          message: `Approved by owner! Security policy requires a minimum 45s quarantine hold. Client will be released in ${remainingSec}s.`,
+          status: 'approved_holding',
+          holdingRemainingSeconds: remainingSec
+        });
+      } else {
+        await releaseQuarantinedDevice(notification.id);
+        return res.json({ message: 'User approved and connected. Quarantine released.', status: 'allowed' });
+      }
+    }
+
+    // action is deny / disallow
+    await denyAndDisconnectDevice(notification.id, 'denied');
+    return res.json({ message: 'Connection request denied and client disconnected.', status: 'denied' });
   }
 
   if (notification.type === 'overconsumption') {
@@ -1421,7 +1608,7 @@ app.delete('/api/locations/:locationId', authRequired, adminRequired, async (req
 
 app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
-  const { locationId, routerId, name, wifiName, ipAddress, serialNumber, status } = req.body;
+  const { locationId, routerId, name, wifiName, wifiPassword = '', ipAddress, serialNumber, status } = req.body;
 
   if (!locationId || !name || !wifiName || !ipAddress) {
     return res.status(400).json({ message: 'locationId, name, wifiName, and ipAddress are required.' });
@@ -1451,11 +1638,20 @@ app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
 
   const sn = (serialNumber && String(serialNumber).trim()) ? String(serialNumber).trim() : generateSerialNumber();
   const deviceId = makeId('device');
+  const cleanPass = String(wifiPassword || '').trim();
   await run(
-    `INSERT INTO devices (id, location_id, router_id, name, wifi_name, serial_number, ip_address, status, allowed_user_ids, created_by, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
-    [deviceId, locationId, finalRouterId, name, wifiName, sn, ipAddress, status || 'allowed', '[]', req.user.id]
+    `INSERT INTO devices (id, location_id, router_id, name, wifi_name, wifi_password, serial_number, ip_address, status, allowed_user_ids, created_by, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '[]', $10, NOW())`,
+    [deviceId, locationId, finalRouterId, name, wifiName, cleanPass, sn, ipAddress, status || 'allowed', req.user.id]
   );
+
+  if (finalRouterId && cleanPass) {
+    await run(
+      `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+       VALUES ($1, $2, 'set_wifi_password', $3, 'queued', NOW())`,
+      [makeId('openwrt-command'), finalRouterId, JSON.stringify({ key: cleanPass, encryption: 'psk2' })]
+    );
+  }
 
   const device = await get('SELECT * FROM devices WHERE id = $1', [deviceId]);
   const location = await get('SELECT * FROM locations WHERE id = $1', [device.location_id]);
@@ -1463,6 +1659,7 @@ app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
     ...device,
     routerId: device.router_id,
     serialNumber: device.serial_number,
+    wifiPassword: device.wifi_password,
     location,
     allowedUserIds: parseAllowedUsers(device.allowed_user_ids),
     allowedUsers: []
@@ -1478,7 +1675,7 @@ app.post('/api/devices', authRequired, adminRequired, async (req, res) => {
 
 app.patch('/api/devices/:deviceId', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
-  const { locationId, routerId, name, wifiName, ipAddress, serialNumber, status } = req.body;
+  const { locationId, routerId, name, wifiName, wifiPassword, ipAddress, serialNumber, status } = req.body;
   const device = await get('SELECT * FROM devices WHERE id = $1', [req.params.deviceId]);
 
   if (!device) {
@@ -1504,13 +1701,23 @@ app.patch('/api/devices/:deviceId', authRequired, adminRequired, async (req, res
   }
 
   const sn = (serialNumber && String(serialNumber).trim()) ? String(serialNumber).trim() : (device.serial_number || generateSerialNumber());
+  const updatedWifiPassword = wifiPassword !== undefined ? String(wifiPassword).trim() : (device.wifi_password || '');
   await run(
-    'UPDATE devices SET location_id = $1, router_id = $2, name = $3, wifi_name = $4, serial_number = $5, ip_address = $6, status = $7 WHERE id = $8',
-    [locationId, finalRouterId, name, wifiName, sn, ipAddress, status || device.status || 'allowed', device.id]
+    'UPDATE devices SET location_id = $1, router_id = $2, name = $3, wifi_name = $4, wifi_password = $5, serial_number = $6, ip_address = $7, status = $8 WHERE id = $9',
+    [locationId, finalRouterId, name, wifiName, updatedWifiPassword, sn, ipAddress, status || device.status || 'allowed', device.id]
   );
+
+  if (finalRouterId && wifiPassword !== undefined && String(wifiPassword).trim()) {
+    await run(
+      `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+       VALUES ($1, $2, 'set_wifi_password', $3, 'queued', NOW())`,
+      [makeId('openwrt-command'), finalRouterId, JSON.stringify({ key: String(wifiPassword).trim(), encryption: 'psk2' })]
+    );
+  }
+
   const updatedDevice = await get('SELECT * FROM devices WHERE id = $1', [device.id]);
   const location = await get('SELECT * FROM locations WHERE id = $1', [updatedDevice.location_id]);
-  res.json({ message: 'Device updated.', device: { ...updatedDevice, routerId: updatedDevice.router_id, serialNumber: updatedDevice.serial_number, location, allowedUserIds: parseAllowedUsers(updatedDevice.allowed_user_ids) } });
+  res.json({ message: 'Device updated.', device: { ...updatedDevice, routerId: updatedDevice.router_id, serialNumber: updatedDevice.serial_number, wifiPassword: updatedDevice.wifi_password, location, allowedUserIds: parseAllowedUsers(updatedDevice.allowed_user_ids) } });
 });
 
 app.delete('/api/devices/:deviceId', authRequired, adminRequired, async (req, res) => {
@@ -1605,18 +1812,23 @@ app.post('/api/devices/:deviceId/disconnect-user', authRequired, adminRequired, 
   );
 
   const device = await get('SELECT * FROM devices WHERE id = $1', [req.params.deviceId]);
-  if (device && device.router_id) {
-    let mac = '';
-    if (userId && userId.startsWith('user-mac-')) {
-      const raw = userId.replace('user-mac-', '');
-      mac = raw.match(/.{1,2}/g)?.join(':') || '';
+  if (device) {
+    const allowed = parseAllowedUsers(device.allowed_user_ids).filter((id) => id !== userId);
+    await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(allowed), device.id]);
+
+    if (device.router_id) {
+      let mac = '';
+      if (userId && userId.startsWith('user-mac-')) {
+        const raw = userId.replace('user-mac-', '');
+        mac = raw.match(/.{1,2}/g)?.join(':') || '';
+      }
+      const commandId = makeId('openwrt-command');
+      await run(
+        `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+         VALUES ($1, $2, 'disconnect', $3, 'queued', NOW())`,
+        [commandId, device.router_id, JSON.stringify({ mac })]
+      );
     }
-    const commandId = makeId('openwrt-command');
-    await run(
-      `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
-       VALUES ($1, $2, 'disconnect', $3, 'queued', NOW())`,
-      [commandId, device.router_id, JSON.stringify({ mac })]
-    );
   }
 
   res.json({ message: 'User disconnected from the device.', connection: { ...connection, status: 'disconnected' } });
@@ -1683,7 +1895,7 @@ app.post('/api/connections/request', authRequired, async (req, res) => {
 
   if (!parseAllowedUsers(device.allowed_user_ids).includes(userId)) {
     const existingRequest = await get(
-      "SELECT id FROM notifications WHERE type = 'connection_request' AND user_id = $1 AND device_id = $2 AND status IN ('unread','quarantine')",
+      "SELECT id FROM notifications WHERE type = 'connection_request' AND user_id = $1 AND device_id = $2 AND status IN ('unread','quarantine','quarantine_wait','approved_holding')",
       [userId, device.id]
     );
     if (!existingRequest) {
@@ -1693,10 +1905,11 @@ app.post('/api/connections/request', authRequired, async (req, res) => {
         userId,
         deviceId: device.id,
         locationId: device.location_id,
-        quarantineSeconds: 10
+        quarantineSeconds: 45,
+        maxQuarantineSeconds: 300
       });
     }
-    return res.status(202).json({ message: 'Connection request sent to the administrator for approval.' });
+    return res.status(202).json({ message: 'Connection request sent to the network owner for approval. Device held in quarantine.' });
   }
 
   const existingConnection = await get(
