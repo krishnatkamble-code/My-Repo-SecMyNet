@@ -15,4 +15,6 @@ if [ -x /usr/bin/secmynet-agent ]; then
   /usr/bin/secmynet-agent --event "$ACTION" "$MAC" "$IP" "$HOST" >/dev/null 2>&1 &
 elif [ -f /root/agent.sh ]; then
   /bin/sh /root/agent.sh --event "$ACTION" "$MAC" "$IP" "$HOST" >/dev/null 2>&1 &
+elif [ -f /etc/secmynet-agent/agent.sh ]; then
+  /bin/sh /etc/secmynet-agent/agent.sh --event "$ACTION" "$MAC" "$IP" "$HOST" >/dev/null 2>&1 &
 fi

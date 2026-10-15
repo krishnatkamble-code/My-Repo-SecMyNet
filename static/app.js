@@ -133,7 +133,66 @@ function userRows() {
 }
 function renderUsers() { const periodFilter = `<div class="usage-header"><button type="button" id="userUsageFilterToggle" class="column-filter-title">Data Used</button><select id="userUsageFilter" aria-label="Filter data used period"><option value="all" ${state.usagePeriod === 'all' ? 'selected' : ''}>Since start</option><option value="day" ${state.usagePeriod === 'day' ? 'selected' : ''}>Today</option><option value="week" ${state.usagePeriod === 'week' ? 'selected' : ''}>Week</option><option value="month" ${state.usagePeriod === 'month' ? 'selected' : ''}>Month</option><option value="year" ${state.usagePeriod === 'year' ? 'selected' : ''}>Year</option></select></div>`; return `<p class="page-intro">All user accounts, their active location, total data consumption, and access controls.</p>${table(['Name', 'Location', 'Device IP & Name', periodFilter, 'Status', 'Actions'], userRows())}`; }
 function renderManage() { const rows = state.data.locations.map((location) => { const devices = state.data.devices.filter((device) => device.location_id === location.id); return `<tr><td><button class="text-link" data-location="${escapeHtml(location.id)}">${escapeHtml(location.name)}</button></td><td>${escapeHtml(location.city)}</td><td>${devices.length}</td><td>${connectedForLocation(location.id)}</td><td><button class="action-button" data-location="${escapeHtml(location.id)}">View location</button><button class="action-button" data-edit-location="${escapeHtml(location.id)}">Edit Location</button><button class="action-button danger-action" data-delete-location="${escapeHtml(location.id)}">Delete Location</button></td></tr>`; }).join(''); return `<p class="page-intro">All locations currently available in your SecMyNet account.</p>${table(['Location', 'City', 'WiFi devices', 'Active Users', 'Actions'], rows)}`; }
-function renderNotifications() { const rows = state.notifications.map((n) => { const isConn = n.type === 'connection_request'; const isPending = ['unread', 'quarantine', 'quarantine_wait', 'approved_holding'].includes(n.status); const isReturning = (n.message || '').includes('Returning user'); let actions = ''; if (isPending && isConn) { actions = `<button class="action-button" style="background:#166534;color:#fff;" data-notification-response="${n.id}|allow">Allow</button><button class="action-button" style="background:#f59e0b;color:#fff;" data-notification-response="${n.id}|wait">Wait (5m)</button><button class="action-button danger" data-notification-response="${n.id}|deny">Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`; } else if (n.status === 'unread' && n.type === 'overconsumption') { actions = `<button class="action-button" data-notification-response="${n.id}|continue">Allow Further</button><button class="action-button danger" data-notification-response="${n.id}|disconnect">Disconnect</button>`; } else { const badgeCls = n.status === 'allowed' ? 'allowed' : ['denied', 'disconnected', 'quarantine_auto_denied'].includes(n.status) ? 'blocked' : ['quarantine', 'quarantine_wait', 'approved_holding'].includes(n.status) ? n.status : ''; actions = `<span class="status-badge ${badgeCls}">${escapeHtml(n.status.replace(/_/g, ' '))}</span>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;margin-left:6px;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`; } const typeBadge = isReturning ? '<span class="status-badge" style="background:#e0f2fe;color:#0369a1;font-size:0.72rem;margin-left:6px;">Returning Client</span>' : ''; return `<tr><td>${escapeHtml(isConn ? 'Connection request' : 'Data overconsumption')}${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`; }).join(''); return `<p class="page-intro">Connection approvals with mandatory 45s quarantine verification, identity hold up to 5 min, and auto-disconnection.</p>${table(['Type', 'Notification', 'Location', 'Time', 'Action'], rows)}`; }
+let notificationsLiveTimer = null;
+function renderNotifications() {
+  if (notificationsLiveTimer) { clearInterval(notificationsLiveTimer); notificationsLiveTimer = null; }
+  const now = Date.now();
+  const rows = state.notifications.map((n) => {
+    const isConn = n.type === 'connection_request';
+    const isPending = ['unread', 'quarantine', 'quarantine_wait', 'approved_holding'].includes(n.status);
+    const isReturning = (n.message || '').includes('Returning user');
+    const minHold = n.min_quarantine_until ? new Date(n.min_quarantine_until).getTime() : 0;
+    const expires = n.expires_at ? new Date(n.expires_at).getTime() : (now + 300000);
+    const holdRemaining = Math.max(0, Math.ceil((minHold - now) / 1000));
+    const timeoutRemaining = Math.max(0, Math.ceil((expires - now) / 1000));
+    let actions = '';
+    if (isPending && isConn) {
+      if (timeoutRemaining === 0) {
+        actions = `<span class="status-badge blocked">Disallowed (5m Timeout)</span>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;margin-left:6px;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+      } else if (n.status === 'approved_holding') {
+        actions = `<button class="action-button" style="background:#475569;color:#fff;opacity:0.75;cursor:not-allowed;" disabled data-quarantine-hold="${minHold}">Releasing in ${holdRemaining}s...</button><button class="action-button danger" data-notification-response="${n.id}|deny">Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+      } else if (holdRemaining > 0) {
+        actions = `<button class="action-button" style="background:#475569;color:#fff;opacity:0.6;cursor:not-allowed;" disabled data-quarantine-hold="${minHold}" data-notification-id="${n.id}" title="Quarantine evaluation hold in progress (${holdRemaining}s left)">Allow (${holdRemaining}s hold)</button><button class="action-button" style="background:#f59e0b;color:#fff;" data-notification-response="${n.id}|wait">Wait (5m)</button><button class="action-button danger" data-notification-response="${n.id}|deny">Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+      } else {
+        actions = `<button class="action-button" style="background:#166534;color:#fff;" data-notification-response="${n.id}|allow">Allow Access</button><button class="action-button" style="background:#f59e0b;color:#fff;" data-notification-response="${n.id}|wait">Wait (5m)</button><button class="action-button danger" data-notification-response="${n.id}|deny">Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+      }
+    } else if (n.status === 'unread' && n.type === 'overconsumption') {
+      actions = `<button class="action-button" data-notification-response="${n.id}|continue">Allow Further</button><button class="action-button danger" data-notification-response="${n.id}|disconnect">Disconnect</button>`;
+    } else {
+      const badgeCls = n.status === 'allowed' ? 'allowed' : ['denied', 'disconnected', 'quarantine_auto_denied'].includes(n.status) ? 'blocked' : ['quarantine', 'quarantine_wait', 'approved_holding'].includes(n.status) ? n.status : '';
+      const displayStatus = n.status === 'quarantine_auto_denied' ? 'Disallowed (5m Timeout)' : n.status.replace(/_/g, ' ');
+      actions = `<span class="status-badge ${badgeCls}">${escapeHtml(displayStatus)}</span>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;margin-left:6px;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+    }
+    const typeBadge = isReturning ? '<span class="status-badge" style="background:#e0f2fe;color:#0369a1;font-size:0.72rem;margin-left:6px;">Returning Client</span>' : '';
+    return `<tr><td>${escapeHtml(isConn ? 'Connection request' : 'Data overconsumption')}${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+  }).join('');
+
+  notificationsLiveTimer = setInterval(() => {
+    if (state.page !== 'notifications') { clearInterval(notificationsLiveTimer); notificationsLiveTimer = null; return; }
+    const curr = Date.now();
+    let needsReRender = false;
+    document.querySelectorAll('[data-quarantine-hold]').forEach((btn) => {
+      const target = Number(btn.dataset.quarantineHold);
+      const rem = Math.max(0, Math.ceil((target - curr) / 1000));
+      if (rem > 0) {
+        if (btn.textContent.includes('Releasing')) {
+          btn.textContent = `Releasing in ${rem}s...`;
+        } else {
+          btn.textContent = `Allow (${rem}s hold)`;
+        }
+      } else {
+        needsReRender = true;
+      }
+    });
+    if (needsReRender) {
+      clearInterval(notificationsLiveTimer);
+      notificationsLiveTimer = null;
+      renderAdmin();
+    }
+  }, 1000);
+
+  return `<p class="page-intro">Connection approvals with mandatory 45s quarantine verification, identity hold up to 5 min, and auto-disconnection.</p>${table(['Type', 'Notification', 'Location', 'Time', 'Action'], rows)}`;
+}
 function renderSuperAdmin() { const adminRows = state.superAdmins.map((admin) => `<tr><td>${escapeHtml(admin.name)}<small>${escapeHtml(admin.email)}</small></td><td>${admin.accessStatus === 'disabled' ? '<span class="status-badge blocked">Blocked</span>' : '<span class="status-badge allowed">Enabled</span>'}</td><td>${admin.locations.map((location) => `${escapeHtml(location.name)} (${location.devicesCount} devices)`).join('<br>') || 'None'}</td><td>${admin.devices.map((device) => escapeHtml(device.name)).join('<br>') || 'None'}</td><td><button class="action-button" data-super-edit="${escapeHtml(admin.id)}">Edit admin</button><button class="action-button" data-super-reset="${escapeHtml(admin.id)}">Send reset link</button><button class="action-button" data-super-toggle="${escapeHtml(admin.id)}">${admin.accessStatus === 'disabled' ? 'Unblock' : 'Block portal access'}</button><button class="action-button danger-action" data-super-delete="${escapeHtml(admin.id)}">Delete Admin</button></td></tr>`).join(''); return `<section class="content-card"><h3>Create admin</h3><form id="superAdminForm"><input name="name" placeholder="Admin name" required><input name="email" type="email" placeholder="Admin email" required><input name="password" type="password" placeholder="Temporary password" maxlength="32" required><button>Create admin</button></form></section><section class="content-card"><h3>Administrators and resources</h3>${table(['Admin', 'Portal access', 'Locations', 'Devices', 'Actions'], adminRows)}</section>`; }
 function renderRouters() {
   const target = state.routerFormTarget;
@@ -552,7 +611,141 @@ function renderUserDashboard(data) { state.userData = data; $('#authSection').cl
 function renderUserPage() { const d = state.userData; const meta = { locations: ['My Locations', 'Locations where you have WiFi access.'], devices: ['My Devices', 'WiFi devices you are authorised to use.'], usage: ['My Usage', 'Your current and historical data consumption.'], account: ['My Account', 'Your SecMyNet account and access summary.'] }[state.userPage]; $('#userPageTitle').textContent = meta[0]; $('#userPageDescription').textContent = meta[1]; document.querySelectorAll('[data-user-page]').forEach((a) => a.classList.toggle('active', a.dataset.userPage === state.userPage)); const uniqueLocations = [...new Map(d.devices.map((device) => [device.location?.id || device.location_id, device.location])).values()].filter(Boolean); let content = ''; if (state.userPage === 'locations') content = `<div class="stats">${stat('Accessible locations', uniqueLocations.length)}${stat('Allowed devices', d.stats.totalDevices)}${stat('Connected now', d.stats.activeConnections)}</div><div class="location-grid">${uniqueLocations.map((l) => { const devices = d.devices.filter((device) => (device.location?.id || device.location_id) === l.id); return `<article class="location-card"><span class="card-kicker">${escapeHtml(l.city)}</span><h3>${escapeHtml(l.name)}</h3><div><strong>${devices.length}</strong> available WiFi devices</div><small>${devices.map((x) => escapeHtml(x.name)).join(', ')}</small></article>`; }).join('') || '<p class="empty">You do not have access to any locations yet.</p>'}</div>`; if (state.userPage === 'devices') content = table(['Device', 'Router ID', 'Location', 'WiFi', 'Access status'], d.devices.map((device) => `<tr><td>${escapeHtml(device.name)}</td><td><code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(device.router_id || device.routerId || 'N/A')}</code></td><td>${escapeHtml(device.location?.name || 'Unknown')}</td><td>${escapeHtml(device.wifi_name || device.wifiName)}</td><td><span class="status-badge allowed">Allowed</span></td></tr>`).join('')); if (state.userPage === 'usage') content = `<div class="stats">${stat('Data since start', mb(usage(d.connections)))}${stat('This month', mb(usage(d.connections, 'month')))}${stat('This week', mb(usage(d.connections, 'week')))}${stat('Today', mb(usage(d.connections, 'day')))}</div>${table(['Device', 'Location', 'Status', 'Data used'], d.connections.map((c) => `<tr><td>${escapeHtml(c.deviceName)}</td><td>${escapeHtml(c.locationName)}</td><td><span class="status-badge ${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></td><td>${mb(c.dataUsedMb)}</td></tr>`).join(''))}`; if (state.userPage === 'account') content = `<div class="stats">${stat('Allowed devices', d.stats.totalDevices)}${stat('Total connections', d.stats.totalConnections)}${stat('Active connections', d.stats.activeConnections)}</div><section class="content-card"><h3>${escapeHtml(d.user.name)}</h3><p>${escapeHtml(d.user.email)}</p><p>Your access is managed by your SecMyNet administrator.</p></section>`; $('#userPageContent').innerHTML = content; }
 let modalCountdownTimer = null;
 async function loadNotifications(showPopup = true) { if (!state.token || !state.data) return; try { const response = await apiRequest('/api/notifications', { headers: authHeaders() }); state.notifications = response.notifications || []; const pending = state.notifications.filter((n) => ['unread', 'quarantine', 'quarantine_wait', 'approved_holding'].includes(n.status)); $('#notificationCount').textContent = pending.length; if (state.page === 'notifications') renderAdmin(); const request = pending.find((n) => n.type === 'connection_request' && ['quarantine', 'quarantine_wait', 'approved_holding', 'unread'].includes(n.status)); if (showPopup && request) showNotificationPopup(request); } catch (_) { } }
-function showNotificationPopup(notification) { if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; } const modal = $('#notificationModal'); const overconsumption = notification.type === 'overconsumption'; const badge = $('#notificationModalBadge'); const timerBox = $('#notificationModalTimerBox'); const waitBtn = $('#notificationWaitBtn'); const histBtn = $('#notificationHistoryBtn'); const titleEl = $('.modal-card h3'); if (histBtn) { if (notification.user_id) { histBtn.classList.remove('hidden'); histBtn.onclick = () => { modal.classList.add('hidden'); showUserDetailsModal(notification.user_id); }; } else { histBtn.classList.add('hidden'); } } if (overconsumption) { if (titleEl) titleEl.textContent = 'Data Usage Alert'; if (badge) badge.classList.add('hidden'); if (timerBox) timerBox.classList.add('hidden'); if (waitBtn) waitBtn.classList.add('hidden'); $('#notificationModalText').textContent = notification.message; $('#notificationAllowBtn').textContent = 'Allow Further'; $('#notificationAllowBtn').style.background = '#2d5aa8'; $('#notificationDenyBtn').textContent = 'Disconnect'; $('#notificationAllowBtn').onclick = () => respondToNotification(notification.id, 'continue'); $('#notificationDenyBtn').onclick = () => respondToNotification(notification.id, 'disconnect'); } else { const isReturning = (notification.message || '').includes('Returning user'); if (titleEl) titleEl.textContent = isReturning ? '🛡️ Returning User Detected (Quarantined)' : '🛡️ New Connection Request (Quarantined)'; if (badge) { badge.classList.remove('hidden'); badge.className = `status-badge ${notification.status}`; badge.textContent = notification.status === 'quarantine_wait' ? 'Quarantine (Wait)' : notification.status === 'approved_holding' ? 'Holding (45s)' : (isReturning ? 'Returning (Quarantine)' : 'Quarantine'); } if (timerBox) timerBox.classList.remove('hidden'); if (waitBtn) { waitBtn.classList.remove('hidden'); waitBtn.onclick = () => respondToNotification(notification.id, 'wait'); } $('#notificationModalText').textContent = notification.message; $('#notificationAllowBtn').textContent = 'Allow Access'; $('#notificationAllowBtn').style.background = '#166534'; $('#notificationDenyBtn').textContent = 'Disallow / Block'; $('#notificationAllowBtn').onclick = () => respondToNotification(notification.id, 'allow'); $('#notificationDenyBtn').onclick = () => respondToNotification(notification.id, 'deny'); function updateTimers() { const now = Date.now(); const minHold = notification.min_quarantine_until ? new Date(notification.min_quarantine_until).getTime() : 0; const expires = notification.expires_at ? new Date(notification.expires_at).getTime() : (now + 300000); const holdRemaining = Math.max(0, Math.ceil((minHold - now) / 1000)); const timeoutRemaining = Math.max(0, Math.ceil((expires - now) / 1000)); const holdEl = $('#notificationHoldCountdown'); const timeoutEl = $('#notificationTimeoutCountdown'); if (holdEl) { if (holdRemaining > 0) { holdEl.textContent = `${holdRemaining}s left (mandatory evaluation hold)`; holdEl.style.color = '#b45309'; } else { holdEl.textContent = 'Passed (Ready to unlock WAN)'; holdEl.style.color = '#166534'; } } if (timeoutEl) { const mins = Math.floor(timeoutRemaining / 60); const secs = String(timeoutRemaining % 60).padStart(2, '0'); timeoutEl.textContent = `${mins}m ${secs}s`; if (timeoutRemaining === 0) { timeoutEl.textContent = 'Expired (Auto-disconnecting)'; } } } updateTimers(); modalCountdownTimer = setInterval(updateTimers, 1000); } modal.classList.remove('hidden'); }
+function showNotificationPopup(notification) {
+  if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
+  const modal = $('#notificationModal');
+  const overconsumption = notification.type === 'overconsumption';
+  const badge = $('#notificationModalBadge');
+  const timerBox = $('#notificationModalTimerBox');
+  const waitBtn = $('#notificationWaitBtn');
+  const histBtn = $('#notificationHistoryBtn');
+  const allowBtn = $('#notificationAllowBtn');
+  const denyBtn = $('#notificationDenyBtn');
+  const titleEl = $('.modal-card h3');
+
+  if (histBtn) {
+    if (notification.user_id) {
+      histBtn.classList.remove('hidden');
+      histBtn.onclick = () => { modal.classList.add('hidden'); showUserDetailsModal(notification.user_id); };
+    } else {
+      histBtn.classList.add('hidden');
+    }
+  }
+
+  if (overconsumption) {
+    if (titleEl) titleEl.textContent = 'Data Usage Alert';
+    if (badge) badge.classList.add('hidden');
+    if (timerBox) timerBox.classList.add('hidden');
+    if (waitBtn) waitBtn.classList.add('hidden');
+    $('#notificationModalText').textContent = notification.message;
+    allowBtn.disabled = false;
+    allowBtn.style.opacity = '1';
+    allowBtn.style.cursor = 'pointer';
+    allowBtn.textContent = 'Allow Further';
+    allowBtn.style.background = '#2d5aa8';
+    denyBtn.disabled = false;
+    denyBtn.textContent = 'Disconnect';
+    allowBtn.onclick = () => respondToNotification(notification.id, 'continue');
+    denyBtn.onclick = () => respondToNotification(notification.id, 'disconnect');
+  } else {
+    const isReturning = (notification.message || '').includes('Returning user');
+    if (titleEl) titleEl.textContent = isReturning ? '🛡️ Returning User Detected (Quarantined)' : '🛡️ New Connection Request (Quarantined)';
+    if (badge) {
+      badge.classList.remove('hidden');
+      badge.className = `status-badge ${notification.status}`;
+      badge.textContent = notification.status === 'quarantine_wait' ? 'Quarantine (Wait)' : notification.status === 'approved_holding' ? 'Holding (45s)' : (isReturning ? 'Returning (Quarantine)' : 'Quarantine');
+    }
+    if (timerBox) timerBox.classList.remove('hidden');
+    if (waitBtn) {
+      waitBtn.classList.remove('hidden');
+      waitBtn.onclick = () => respondToNotification(notification.id, 'wait');
+    }
+    $('#notificationModalText').textContent = notification.message;
+    denyBtn.disabled = false;
+    denyBtn.textContent = 'Disallow / Block';
+    denyBtn.style.background = '#b91c1c';
+    denyBtn.onclick = () => respondToNotification(notification.id, 'deny');
+    allowBtn.onclick = () => {
+      if (allowBtn.disabled) return;
+      respondToNotification(notification.id, 'allow');
+    };
+
+    function updateTimers() {
+      const now = Date.now();
+      const minHold = notification.min_quarantine_until ? new Date(notification.min_quarantine_until).getTime() : 0;
+      const expires = notification.expires_at ? new Date(notification.expires_at).getTime() : (now + 300000);
+      const holdRemaining = Math.max(0, Math.ceil((minHold - now) / 1000));
+      const timeoutRemaining = Math.max(0, Math.ceil((expires - now) / 1000));
+      const holdEl = $('#notificationHoldCountdown');
+      const timeoutEl = $('#notificationTimeoutCountdown');
+
+      if (timeoutRemaining === 0) {
+        if (timeoutEl) {
+          timeoutEl.textContent = '0m 00s — Expired (Auto-Disallowed & Disconnected)';
+          timeoutEl.style.color = '#b91c1c';
+        }
+        if (badge) {
+          badge.className = 'status-badge blocked';
+          badge.textContent = 'Disallowed (5m Timeout)';
+        }
+        if (allowBtn) {
+          allowBtn.disabled = true;
+          allowBtn.style.opacity = '0.45';
+          allowBtn.style.cursor = 'not-allowed';
+          allowBtn.textContent = 'Disallowed (Timeout)';
+          allowBtn.style.background = '#64748b';
+        }
+        if (waitBtn) waitBtn.classList.add('hidden');
+        denyBtn.textContent = 'Close';
+        denyBtn.onclick = () => {
+          modal.classList.add('hidden');
+          loadDashboard();
+        };
+      } else if (holdRemaining > 0) {
+        // MANDATORY QUARANTINE HOLD (Minimum 45s before owner can approve)
+        if (holdEl) {
+          holdEl.textContent = `${holdRemaining}s left (mandatory evaluation hold)`;
+          holdEl.style.color = '#b45309';
+        }
+        if (allowBtn) {
+          allowBtn.disabled = true;
+          allowBtn.style.opacity = '0.55';
+          allowBtn.style.cursor = 'not-allowed';
+          allowBtn.textContent = `Allow Access (${holdRemaining}s hold)`;
+          allowBtn.style.background = '#475569';
+          allowBtn.title = `Owner cannot approve before 45s quarantine hold. Unlocks in ${holdRemaining}s.`;
+        }
+        if (timeoutEl) {
+          const mins = Math.floor(timeoutRemaining / 60);
+          const secs = String(timeoutRemaining % 60).padStart(2, '0');
+          timeoutEl.textContent = `${mins}m ${secs}s`;
+        }
+      } else {
+        // 45 seconds passed! Owner can approve
+        if (holdEl) {
+          holdEl.textContent = 'Passed (Ready to unlock WAN)';
+          holdEl.style.color = '#166534';
+        }
+        if (allowBtn) {
+          allowBtn.disabled = false;
+          allowBtn.style.opacity = '1';
+          allowBtn.style.cursor = 'pointer';
+          allowBtn.textContent = 'Allow Access';
+          allowBtn.style.background = '#166534';
+          allowBtn.title = 'Approve connection and grant internet access';
+        }
+        if (timeoutEl) {
+          const mins = Math.floor(timeoutRemaining / 60);
+          const secs = String(timeoutRemaining % 60).padStart(2, '0');
+          timeoutEl.textContent = `${mins}m ${secs}s`;
+        }
+      }
+    }
+    updateTimers();
+    modalCountdownTimer = setInterval(updateTimers, 1000);
+  }
+  modal.classList.remove('hidden');
+}
 async function respondToNotification(id, action) { if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; } try { const res = await apiRequest(`/api/notifications/${id}/respond`, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ action, allow: action === 'allow' }) }); $('#notificationModal').classList.add('hidden'); if (res && res.message) alert(res.message); await loadDashboard(); } catch (e) { alert(e.message); } }
 async function loadDashboard() { try { const profile = await apiRequest('/api/profile', { headers: authHeaders() }); if (profile.user.role === 'user') return renderUserDashboard(await apiRequest('/api/user-dashboard', { headers: authHeaders() })); state.data = await apiRequest('/api/dashboard', { headers: authHeaders() }); $('#authSection').classList.add('hidden'); $('#dashboard').classList.remove('hidden'); $('#userDashboard').classList.add('hidden'); $('#locationCount').textContent = state.data.stats.totalLocations; $('#deviceCount').textContent = state.data.stats.totalDevices; await loadNotifications(); await loadOpenWrtRouters(); const extraClients = (state.routers || []).flatMap((r) => r.clients || []).filter((cl) => { const mac = (cl.mac || '').toLowerCase(); return !state.data.users.some((u) => (u.email || '').toLowerCase() === mac || u.id === 'user-mac-' + mac.replace(/[^a-z0-9]/g, '')); }); $('#userCount').textContent = state.data.users.filter((user) => user.role !== 'super_admin').length + extraClients.length; state.page = location.hash.slice(1) || (profile.user.role === 'super_admin' ? 'users' : 'overview'); if (!pageMeta(state.page) || (state.page === 'super-admin' && profile.user.role !== 'super_admin')) state.page = profile.user.role === 'super_admin' ? 'users' : 'overview'; if (state.page === 'super-admin') state.page = 'users'; if (profile.user.role === 'super_admin') await loadSuperAdmins(); renderAdmin(); } catch (e) { logout(); alert(e.message); } }
 async function login(e, endpoint) { e.preventDefault(); try { const data = await apiRequest(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.fromEntries(new FormData(e.currentTarget))) }); state.token = data.token; localStorage.setItem('secmynet-token', state.token); await loadDashboard(); } catch (err) { alert(err.message); } }

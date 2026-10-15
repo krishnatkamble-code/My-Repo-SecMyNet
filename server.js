@@ -534,10 +534,26 @@ async function processTelemetry(routerId, clients = [], usage = []) {
         }
 
         // Check if client is ALREADY actively connected in an approved session
-        const activeConn = await get(
+        let activeConn = await get(
           "SELECT * FROM connections WHERE device_id = $1 AND user_id = $2 AND status = 'connected' LIMIT 1",
           [device.id, userId]
         );
+
+        if (activeConn) {
+          // If the station counters reset (rx < prevRx and rx < 100000), or if connection is re-associated,
+          // treat as a new connection session: mark old session disconnected and force into quarantine!
+          const countersReset = (rx < prevRx && rx < 100000);
+          if (countersReset) {
+            await run("UPDATE connections SET status = 'disconnected', disconnected_at = NOW() WHERE id = $1", [activeConn.id]);
+            const currentAllowed = parseAllowedUsers(device.allowed_user_ids);
+            if (currentAllowed.includes(userId)) {
+              const updatedAllowed = currentAllowed.filter((uid) => uid !== userId);
+              await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(updatedAllowed), device.id]);
+              device.allowed_user_ids = JSON.stringify(updatedAllowed);
+            }
+            activeConn = null;
+          }
+        }
 
         if (activeConn) {
           // Ongoing active session approved by owner; update data consumption
@@ -1513,6 +1529,15 @@ app.post('/api/notifications/:notificationId/respond', authRequired, adminRequir
   }
 
   if (notification.type === 'connection_request') {
+    // 5-minute timeout enforcement: if 5 minutes have elapsed with no owner approval, disallow and disconnect
+    if (notification.expires_at && new Date(notification.expires_at).getTime() <= Date.now()) {
+      await denyAndDisconnectDevice(notification.id, 'quarantine_auto_denied');
+      return res.status(400).json({
+        message: 'Quarantine window expired after 5 minutes with no owner approval. Client has been disallowed and disconnected.',
+        status: 'quarantine_auto_denied'
+      });
+    }
+
     if (action === 'wait') {
       const newExpiresAt = new Date(Date.now() + 300 * 1000).toISOString();
       await run("UPDATE notifications SET status = 'quarantine_wait', expires_at = $1 WHERE id = $2", [newExpiresAt, notification.id]);

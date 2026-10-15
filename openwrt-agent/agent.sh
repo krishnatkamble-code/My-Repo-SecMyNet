@@ -15,7 +15,7 @@ ROUTER_ID="$(printf '%s' "$ROUTER_ID" | tr -d '\r\n ')"
 TOKEN_FILE=${TOKEN_FILE:-/etc/secmynet-agent/token}
 STATE_FILE=${STATE_FILE:-/var/run/secmynet-agent/state.json}
 LOG_FILE=${LOG_FILE:-/var/log/secmynet-agent.log}
-INTERVAL=${INTERVAL:-30}
+INTERVAL=${INTERVAL:-5}
 
 log() {
   echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') $*" >> "$LOG_FILE"
@@ -50,6 +50,7 @@ collect_clients() {
   rx=0
   tx=0
   sig="null"
+  seen_macs=" "
 
   while read -r w1 w2 w3 rest; do
     case "$w1" in
@@ -61,6 +62,7 @@ collect_clients() {
           [ "$first" = "0" ] && clients="$clients,"
           first=0
           clients="${clients}{\"mac\":\"$cur_mac\",\"ip\":\"${ip:-}\",\"hostname\":\"${host:-}\",\"rx_bytes\":${rx:-0},\"tx_bytes\":${tx:-0},\"signal\":${sig:-null}}"
+          seen_macs="${seen_macs}${cur_mac} "
         fi
         cur_mac="$w2"
         rx=0
@@ -85,7 +87,26 @@ collect_clients() {
     [ -z "$ip" ] && ip=$(ip neigh 2>/dev/null | grep -i "$cur_mac" | cut -d' ' -f1)
     host=$(grep -i "$cur_mac" /tmp/dhcp.leases 2>/dev/null | cut -d' ' -f4)
     [ "$first" = "0" ] && clients="$clients,"
+    first=0
     clients="${clients}{\"mac\":\"$cur_mac\",\"ip\":\"${ip:-}\",\"hostname\":\"${host:-}\",\"rx_bytes\":${rx:-0},\"tx_bytes\":${tx:-0},\"signal\":${sig:-null}}"
+    seen_macs="${seen_macs}${cur_mac} "
+  fi
+
+  # Also inspect /tmp/dhcp.leases for recently leased clients (e.g., mobile phones)
+  if [ -f /tmp/dhcp.leases ]; then
+    while read -r l_ts l_mac l_ip l_host rest; do
+      [ -z "$l_mac" ] && continue
+      case "$seen_macs" in
+        *" $l_mac "*) continue ;;
+      esac
+      is_active=$(grep -i "$l_mac" /proc/net/arp 2>/dev/null | grep -v '0x0')
+      if [ -n "$is_active" ] || ip neigh 2>/dev/null | grep -qi "$l_mac"; then
+        [ "$first" = "0" ] && clients="$clients,"
+        first=0
+        clients="${clients}{\"mac\":\"$l_mac\",\"ip\":\"${l_ip:-}\",\"hostname\":\"${l_host:-}\",\"rx_bytes\":0,\"tx_bytes\":0,\"signal\":null}"
+        seen_macs="${seen_macs}${l_mac} "
+      fi
+    done < /tmp/dhcp.leases
   fi
 
   rm -f "$tmp"

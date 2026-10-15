@@ -44,7 +44,8 @@ test('Quarantine-first lifecycle and timing test', async (t) => {
   assert.ok(agentToken);
 
   // 3. Post telemetry with a brand new, unapproved client
-  const testMac = '02:00:00:11:22:33';
+  const rand1 = Math.floor(Math.random() * 89 + 10).toString();
+  const testMac = `02:00:00:11:22:${rand1}`;
   const telemetryRes = await fetch(`${baseUrl}/api/openwrt/routers/${routerId}/telemetry`, {
     method: 'POST',
     headers: {
@@ -186,7 +187,8 @@ test('Returning user re-quarantine and connection history retention', async (t) 
   });
   const { routerId, agentToken } = await routerRes.json();
 
-  const clientMac = '02:00:00:aa:bb:cc';
+  const rand2 = Math.floor(Math.random() * 89 + 10).toString();
+  const clientMac = `02:00:00:aa:bb:${rand2}`;
   const clientHostname = 'Returning-Phone';
 
   // 3. First connection: brand new device
@@ -264,4 +266,85 @@ test('Returning user re-quarantine and connection history retention', async (t) 
   const qCmd = commands.find((c) => c.command_type === 'quarantine' && c.payload.mac === clientMac);
   assert.ok(qCmd, 'Router command queue must have quarantine command for returning user');
 });
+
+test('Quarantine 5-minute timeout auto-disallow and expiration rejection', async (t) => {
+  let server;
+  let baseUrl;
+
+  await new Promise((resolve) => {
+    server = app.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      baseUrl = `http://127.0.0.1:${port}`;
+      resolve();
+    });
+  });
+
+  t.after(() => {
+    if (server) server.close();
+  });
+
+  // Admin Login
+  const loginRes = await fetch(`${baseUrl}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'admin@secmynet.com', password: 'Admin@123' })
+  });
+  const { token: adminToken } = await loginRes.json();
+
+  // Register router
+  const routerRes = await fetch(`${baseUrl}/api/openwrt/routers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ name: 'Timeout-Test-Router' })
+  });
+  const { routerId, agentToken } = await routerRes.json();
+
+  const timeoutMac = `02:00:00:99:88:${Math.floor(Math.random() * 89 + 10)}`;
+
+  // Post telemetry
+  await fetch(`${baseUrl}/api/openwrt/routers/${routerId}/telemetry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-SecMyNet-Agent-Token': agentToken },
+    body: JSON.stringify({
+      clients: [{ mac: timeoutMac, ip: '192.168.1.199', hostname: 'Timeout-Target', rx_bytes: 1024, tx_bytes: 1024 }],
+      usage: []
+    })
+  });
+  await new Promise((r) => setTimeout(r, 600));
+
+  // Get quarantine notification
+  const notifRes = await fetch(`${baseUrl}/api/notifications`, { headers: { Authorization: `Bearer ${adminToken}` } });
+  const { notifications } = await notifRes.json();
+  const qNotif = notifications.find((n) => n.message && n.message.includes(timeoutMac) && n.status === 'quarantine');
+  assert.ok(qNotif, 'Quarantine notification must exist');
+
+  // Manually fast-forward expires_at to 1 second in past in the database to simulate 5 minutes having elapsed
+  const db = require('../db');
+  await db.run("UPDATE notifications SET expires_at = $1 WHERE id = $2", [new Date(Date.now() - 1000).toISOString(), qNotif.id]);
+
+  // Attempt to approve expired quarantine request -> must be rejected with 400 and status quarantine_auto_denied
+  const lateAllowRes = await fetch(`${baseUrl}/api/notifications/${qNotif.id}/respond`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ action: 'allow' })
+  });
+  assert.equal(lateAllowRes.status, 400);
+  const lateAllowBody = await lateAllowRes.json();
+  assert.equal(lateAllowBody.status, 'quarantine_auto_denied');
+
+  // Verify notification in database is marked quarantine_auto_denied
+  const updatedNotif = await db.get("SELECT * FROM notifications WHERE id = $1", [qNotif.id]);
+  assert.equal(updatedNotif.status, 'quarantine_auto_denied');
+
+  // Verify OpenWrt router received disconnect and block commands
+  const cmdsRes = await fetch(`${baseUrl}/api/openwrt/routers/${routerId}/commands`, {
+    headers: { 'X-SecMyNet-Agent-Token': agentToken }
+  });
+  const { commands } = await cmdsRes.json();
+  const discCmd = commands.find((c) => c.command_type === 'disconnect' && c.payload.mac === timeoutMac);
+  const blkCmd = commands.find((c) => c.command_type === 'block' && c.payload.mac === timeoutMac);
+  assert.ok(discCmd, 'Disconnect command must be queued on 5m timeout auto-disallow');
+  assert.ok(blkCmd, 'Block command must be queued on 5m timeout auto-disallow');
+});
+
 
