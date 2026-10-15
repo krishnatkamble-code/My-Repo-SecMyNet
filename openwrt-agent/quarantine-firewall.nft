@@ -1,8 +1,9 @@
 # /etc/nftables.d/secmynet-quarantine.nft
 # SecMyNet Zero-Trust Quarantine-First Firewall Rules for OpenWrt (nftables)
 #
-# Blocks Internet (WAN) forwarding for all quarantined clients (both IPv4 and IPv6).
-# Preserves local DNS/DHCP communication with the router.
+# Blocks ALL Internet (WAN) forwarding for all quarantined clients (both IPv4 and IPv6).
+# Drops packets at both Layer 2 (bridge) and Layer 3 (prerouting & forward).
+# Preserves local DHCP (ports 67,68) and DNS (port 53) to local router.
 # Redirects HTTP port 80 to port 8080 (SecMyNet Holding Captive Portal).
 
 table inet secmynet {
@@ -24,17 +25,23 @@ table inet secmynet {
         comment "SecMyNet quarantined client IPv6s pending owner approval"
     }
 
-    chain prerouting {
+    chain prerouting_nat {
         type nat hook prerouting priority -100; policy accept;
         # Redirect HTTP port 80 to router port 8080 for captive portal holding page
         ether saddr @quarantined_macs tcp dport 80 redirect to 8080
         ip saddr @quarantined_ips tcp dport 80 redirect to 8080
     }
 
-    chain forward {
-        type filter hook forward priority -10; policy accept;
+    chain prerouting_filter {
+        type filter hook prerouting priority -150; policy accept;
 
-        # Always allow DNS (port 53) to router so phones can resolve captive portal hostnames
+        # Allow local DHCP requests to router
+        ether saddr @quarantined_macs udp dport 67 accept
+        ether saddr @quarantined_macs udp dport 68 accept
+        ip saddr @quarantined_ips udp dport 67 accept
+        ip saddr @quarantined_ips udp dport 68 accept
+
+        # Allow local DNS to router
         ether saddr @quarantined_macs udp dport 53 accept
         ether saddr @quarantined_macs tcp dport 53 accept
         ip saddr @quarantined_ips udp dport 53 accept
@@ -42,9 +49,55 @@ table inet secmynet {
         ip6 saddr @quarantined_ip6s udp dport 53 accept
         ip6 saddr @quarantined_ip6s tcp dport 53 accept
 
+        # Allow HTTP port 80 to captive portal
+        ether saddr @quarantined_macs tcp dport 80 accept
+        ip saddr @quarantined_ips tcp dport 80 accept
+
+        # DROP ALL OTHER PACKETS AT PREROUTING BEFORE CONNTRACK (IPv4 and IPv6)
+        ether saddr @quarantined_macs counter drop
+        ip saddr @quarantined_ips counter drop
+        ip6 saddr @quarantined_ip6s counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority -10; policy accept;
+
+        # Allow local DHCP requests
+        ether saddr @quarantined_macs udp dport 67 accept
+        ether saddr @quarantined_macs udp dport 68 accept
+
         # Strictly DROP all other forwarding to Internet (WAN) for IPv4 and IPv6
         ether saddr @quarantined_macs counter drop
         ip saddr @quarantined_ips counter drop
         ip6 saddr @quarantined_ip6s counter drop
+    }
+}
+
+# Layer 2 Bridge Table (directly inspects and drops raw Ethernet frames on br-lan)
+table bridge secmynet {
+    set quarantined_macs {
+        type ether_addr
+        flags interval
+        comment "SecMyNet Layer 2 quarantined MACs"
+    }
+
+    chain forward {
+        type filter hook forward priority -10; policy accept;
+        ether saddr @quarantined_macs udp dport 67 accept
+        ether saddr @quarantined_macs udp dport 68 accept
+        ether saddr @quarantined_macs udp dport 53 accept
+        ether saddr @quarantined_macs tcp dport 53 accept
+        ether saddr @quarantined_macs tcp dport 80 accept
+        ether saddr @quarantined_macs counter drop
+    }
+
+    chain prerouting {
+        type filter hook prerouting priority -10; policy accept;
+        ether saddr @quarantined_macs udp dport 67 accept
+        ether saddr @quarantined_macs udp dport 68 accept
+        ether saddr @quarantined_macs udp dport 53 accept
+        ether saddr @quarantined_macs tcp dport 53 accept
+        ether saddr @quarantined_macs tcp dport 80 accept
+        ether saddr @quarantined_macs counter drop
     }
 }

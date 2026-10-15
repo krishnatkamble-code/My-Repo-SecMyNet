@@ -447,6 +447,10 @@ async function denyAndDisconnectDevice(notificationId, reason = 'denied') {
   return true;
 }
 
+// In-memory map to track when each station was last actively observed in telemetry
+// Key: `${deviceId}:${userId}`, Value: timestamp (Date.now())
+const clientLastSeenMap = new Map();
+
 // Process telemetry from OpenWrt agents: persist per-client usage records so the
 // server can calculate deltas, trigger notifications, and build usage history.
 async function processTelemetry(routerId, clients = [], usage = []) {
@@ -533,6 +537,9 @@ async function processTelemetry(routerId, clients = [], usage = []) {
           }
         }
 
+        // Record last seen timestamp for active client to handle Wi-Fi power-save sleep
+        clientLastSeenMap.set(`${device.id}:${userId}`, Date.now());
+
         // Check if client is ALREADY actively connected in an approved session
         let activeConn = await get(
           "SELECT * FROM connections WHERE device_id = $1 AND user_id = $2 AND status = 'connected' LIMIT 1",
@@ -590,7 +597,7 @@ async function processTelemetry(routerId, clients = [], usage = []) {
           );
 
           if (!existingPendingNotification) {
-            // Retrieve all past completed sessions from database to build connection history
+            // New connection session (first time or reconnect after disconnect)
             const pastSessions = await all(
               "SELECT * FROM connections WHERE user_id = $1 AND status = 'disconnected' ORDER BY connected_at DESC",
               [userId]
@@ -623,8 +630,14 @@ async function processTelemetry(routerId, clients = [], usage = []) {
               quarantineSeconds: 45,
               maxQuarantineSeconds: 300
             });
+          }
 
-            // Instruct router agent to keep client quarantined at firewall level
+          // Always instruct router agent to enforce quarantine at firewall level for unapproved client
+          const queuedQuarantineCmd = await get(
+            "SELECT id FROM openwrt_commands WHERE router_id = $1 AND command_type = 'quarantine' AND status = 'queued' AND payload_json LIKE $2",
+            [routerId, `%"mac":"${mac}"%`]
+          );
+          if (!queuedQuarantineCmd) {
             await run(
               `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
                VALUES ($1, $2, 'quarantine', $3, 'queued', NOW())`,
