@@ -55,6 +55,14 @@ init_firewall() {
       nft -f /etc/nftables.d/secmynet-quarantine.nft 2>/dev/null || true
     fi
 
+    # Ensure table bridge secmynet_br exists
+    nft add table bridge secmynet_br 2>/dev/null || true
+    nft add set bridge secmynet_br quarantined_macs '{ type ether_addr; }' 2>/dev/null || true
+
+    # Ensure table netdev secmynet_l2 exists
+    nft add table netdev secmynet_l2 2>/dev/null || true
+    nft add set netdev secmynet_l2 quarantined_macs '{ type ether_addr; }' 2>/dev/null || true
+
     # Ensure table inet secmynet exists with valid syntax (no flags interval on ether_addr)
     nft add table inet secmynet 2>/dev/null || true
     nft add set inet secmynet quarantined_macs '{ type ether_addr; }' 2>/dev/null || true
@@ -192,6 +200,16 @@ apply_quarantine() {
     nft insert rule inet fw4 dstnat ether saddr "$mac" tcp dport 80 redirect to 8080 2>/dev/null || true
     [ -n "$ip" ] && nft insert rule inet fw4 dstnat ip saddr "$ip" tcp dport 80 redirect to 8080 2>/dev/null || true
 
+    # Layer 2 Bridge table (OpenWrt L2 filter)
+    nft add table bridge secmynet_br 2>/dev/null || true
+    nft add set bridge secmynet_br quarantined_macs '{ type ether_addr; }' 2>/dev/null || true
+    nft add element bridge secmynet_br quarantined_macs "{ $mac }" 2>/dev/null || true
+
+    # Layer 2 Netdev Ingress table
+    nft add table netdev secmynet_l2 2>/dev/null || true
+    nft add set netdev secmynet_l2 quarantined_macs '{ type ether_addr; }' 2>/dev/null || true
+    nft add element netdev secmynet_l2 quarantined_macs "{ $mac }" 2>/dev/null || true
+
     # Standalone table inet secmynet (clean set syntax without flags interval)
     nft add table inet secmynet 2>/dev/null || true
     nft add set inet secmynet quarantined_macs '{ type ether_addr; }' 2>/dev/null || true
@@ -265,11 +283,18 @@ apply_allow() {
 
   # 2. Remove nftables rules
   if command -v nft >/dev/null 2>&1; then
+    nft delete element bridge secmynet_br quarantined_macs "{ $mac }" 2>/dev/null || true
+    nft delete element netdev secmynet_l2 quarantined_macs "{ $mac }" 2>/dev/null || true
     nft delete element inet secmynet quarantined_macs "{ $mac }" 2>/dev/null || true
     [ -n "$ip" ] && nft delete element inet secmynet quarantined_ips "{ $ip }" 2>/dev/null || true
     for ip6 in $(ip -6 neigh show 2>/dev/null | grep -i "$mac" | awk '{print $1}'); do
       [ -n "$ip6" ] && nft delete element inet secmynet quarantined_ip6s "{ $ip6 }" 2>/dev/null || true
     done
+    if [ -f /tmp/hosts/odhcpd ]; then
+      for ip6 in $(grep -i "$mac" /tmp/hosts/odhcpd 2>/dev/null | awk '{print $1}'); do
+        [ -n "$ip6" ] && nft delete element inet secmynet quarantined_ip6s "{ $ip6 }" 2>/dev/null || true
+      done
+    fi
     # Flush injected fw4 rules and restore standard fw4
     /etc/init.d/firewall reload 2>/dev/null || true
   fi
@@ -423,18 +448,21 @@ poll_commands() {
         done
         ;;
       block)
-        mac=$(echo "$payload" | jq -r '.mac' 2>/dev/null)
+        mac=$(echo "$payload" | jq -r '.mac // .MAC' 2>/dev/null)
+        ip=$(echo "$payload" | jq -r '.ip // .IP' 2>/dev/null)
+        [ "$ip" = "null" ] && ip=""
+        [ "$mac" = "null" ] && mac=""
+        mac="$(printf '%s' "$mac" | tr '[:upper:]' '[:lower:]')"
         mkdir -p /etc/secmynet-agent
         echo "$mac" >> /etc/secmynet-agent/blocked_macs
         sed -i "/$mac/d" /etc/secmynet-agent/allowed_macs 2>/dev/null || true
-        apply_quarantine "$mac" ""
-        if command -v uci >/dev/null 2>&1; then
-          for ifname in $(uci show wireless | grep "\.maclist" | sed -E "s/.*\['?(.*)'?\].*/\\1/" | cut -d '.' -f1); do
-            uci add_list wireless.@wifi-iface[0].maclist="$mac" 2>/dev/null || true
-          done
-          uci commit wireless 2>/dev/null || true
-          wifi reload 2>/dev/null || true
-        fi
+        # Strictly enforce firewall and kernel policy routing quarantine
+        apply_quarantine "$mac" "$ip"
+        # Deauthenticate station from wifi interfaces without bouncing radio (avoids resetting firewall rules)
+        for iface in $(iw dev 2>/dev/null | sed -n 's/.*Interface //p'); do
+          iw dev "$iface" station del "$mac" 2>/dev/null || hostapd_cli -i "$iface" deauthenticate "$mac" 2>/dev/null || true
+        done
+        log "Client $mac blocked and quarantined by owner."
         ;;
       quarantine)
         mac=$(echo "$payload" | jq -r '.mac' 2>/dev/null)
@@ -478,9 +506,17 @@ enforce_active_quarantines() {
     for sta in $(iw dev "$iface" station dump 2>/dev/null | awk '/Station/ {print $2}'); do
       sta_mac="$(printf '%s' "$sta" | tr '[:upper:]' '[:lower:]')"
       [ -z "$sta_mac" ] && continue
+      sta_ip=$(grep -i "$sta_mac" /tmp/dhcp.leases 2>/dev/null | cut -d' ' -f3 | head -n1)
+      [ -z "$sta_ip" ] && sta_ip=$(ip -4 neigh show 2>/dev/null | grep -i "$sta_mac" | awk '{print $1}' | head -n1)
+
+      # If station is in blocked_macs, immediately enforce quarantine and deauthenticate
+      if grep -qi "$sta_mac" /etc/secmynet-agent/blocked_macs 2>/dev/null; then
+        apply_quarantine "$sta_mac" "$sta_ip"
+        iw dev "$iface" station del "$sta_mac" 2>/dev/null || hostapd_cli -i "$iface" deauthenticate "$sta_mac" 2>/dev/null || true
+        continue
+      fi
+
       if ! grep -qi "$sta_mac" /etc/secmynet-agent/allowed_macs 2>/dev/null; then
-        sta_ip=$(grep -i "$sta_mac" /tmp/dhcp.leases 2>/dev/null | cut -d' ' -f3 | head -n1)
-        [ -z "$sta_ip" ] && sta_ip=$(ip -4 neigh show 2>/dev/null | grep -i "$sta_mac" | awk '{print $1}' | head -n1)
         apply_quarantine "$sta_mac" "$sta_ip"
       fi
     done

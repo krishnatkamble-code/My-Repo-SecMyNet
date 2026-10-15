@@ -395,10 +395,12 @@ async function releaseQuarantinedDevice(notificationId) {
         const raw = notification.user_id.replace('user-mac-', '');
         mac = raw.match(/.{1,2}/g)?.join(':') || '';
       }
+      const clientUser = await get('SELECT mobile_number FROM users WHERE id = $1', [notification.user_id]);
+      const ip = (clientUser && clientUser.mobile_number && clientUser.mobile_number.includes('.')) ? clientUser.mobile_number : '';
       await run(
         `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
          VALUES ($1, $2, 'allow', $3, 'queued', NOW())`,
-        [makeId('openwrt-command'), device.router_id, JSON.stringify({ mac })]
+        [makeId('openwrt-command'), device.router_id, JSON.stringify({ mac, ip })]
       );
     }
   }
@@ -437,15 +439,18 @@ async function denyAndDisconnectDevice(notificationId, reason = 'denied') {
         const raw = notification.user_id.replace('user-mac-', '');
         mac = raw.match(/.{1,2}/g)?.join(':') || '';
       }
+      const clientUser = await get('SELECT mobile_number FROM users WHERE id = $1', [notification.user_id]);
+      const ip = (clientUser && clientUser.mobile_number && clientUser.mobile_number.includes('.')) ? clientUser.mobile_number : '';
+
       await run(
         `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
          VALUES ($1, $2, 'disconnect', $3, 'queued', NOW())`,
-        [makeId('openwrt-command'), device.router_id, JSON.stringify({ mac })]
+        [makeId('openwrt-command'), device.router_id, JSON.stringify({ mac, ip })]
       );
       await run(
         `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
          VALUES ($1, $2, 'block', $3, 'queued', NOW())`,
-        [makeId('openwrt-command'), device.router_id, JSON.stringify({ mac })]
+        [makeId('openwrt-command'), device.router_id, JSON.stringify({ mac, ip })]
       );
     }
   }

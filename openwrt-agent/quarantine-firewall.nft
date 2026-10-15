@@ -2,9 +2,74 @@
 # SecMyNet Zero-Trust Quarantine-First Firewall Rules for OpenWrt (nftables)
 #
 # Blocks ALL Internet (WAN) forwarding for all quarantined clients (both IPv4 and IPv6).
-# Drops packets at both Layer 2 (bridge) and Layer 3 (prerouting & forward).
+# Drops packets at Layer 2 (bridge & netdev ingress) and Layer 3 (inet prerouting & forward).
 # Preserves local DHCP (ports 67,68) and DNS (port 53) to local router.
 # Redirects HTTP port 80 to port 8080 (SecMyNet Holding Captive Portal).
+
+table bridge secmynet_br {
+    set quarantined_macs {
+        type ether_addr
+        comment "SecMyNet quarantined client MACs"
+    }
+
+    chain prerouting {
+        type filter hook prerouting priority -300; policy accept;
+
+        # 1. Allow local DHCP to router
+        ether type ip ip protocol udp udp dport 67 accept
+        ether type ip ip protocol udp udp dport 68 accept
+
+        # 2. Allow local DNS to router
+        ether type ip ip protocol udp udp dport 53 accept
+        ether type ip ip protocol tcp tcp dport 53 accept
+        ether type ip6 ip6 nexthdr udp udp dport 53 accept
+        ether type ip6 ip6 nexthdr tcp tcp dport 53 accept
+
+        # 3. Allow HTTP port 80 to captive portal
+        ether type ip ip protocol tcp tcp dport 80 accept
+
+        # 4. Strictly DROP ALL OTHER PACKETS AT BRIDGE PREROUTING (both IPv4 and IPv6)
+        ether saddr @quarantined_macs counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority -300; policy accept;
+
+        # Allow DHCP
+        ether type ip ip protocol udp udp dport 67 accept
+        ether type ip ip protocol udp udp dport 68 accept
+
+        # Strictly DROP all other bridge forwarding
+        ether saddr @quarantined_macs counter drop
+    }
+}
+
+table netdev secmynet_l2 {
+    set quarantined_macs {
+        type ether_addr
+        comment "SecMyNet quarantined client MACs"
+    }
+
+    chain ingress_br_lan {
+        type filter hook ingress device "br-lan" priority -500; policy accept;
+
+        # 1. Allow local DHCP to router
+        ether type ip ip protocol udp udp dport 67 accept
+        ether type ip ip protocol udp udp dport 68 accept
+
+        # 2. Allow local DNS to router
+        ether type ip ip protocol udp udp dport 53 accept
+        ether type ip ip protocol tcp tcp dport 53 accept
+        ether type ip6 ip6 nexthdr udp udp dport 53 accept
+        ether type ip6 ip6 nexthdr tcp tcp dport 53 accept
+
+        # 3. Allow HTTP port 80 to captive portal
+        ether type ip ip protocol tcp tcp dport 80 accept
+
+        # 4. Strictly DROP ALL OTHER PACKETS AT PHYSICAL INGRESS (both IPv4 and IPv6)
+        ether saddr @quarantined_macs counter drop
+    }
+}
 
 table inet secmynet {
     set quarantined_macs {
