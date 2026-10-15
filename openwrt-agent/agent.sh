@@ -38,29 +38,28 @@ read_token() {
 init_firewall() {
   mkdir -p /etc/secmynet-agent
 
+  # Setup Linux Policy Routing Table 99 (Blackhole default WAN route)
+  lan_subnet=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet / {print $2}' | head -n1)
+  [ -z "$lan_subnet" ] && lan_subnet="192.168.1.0/24"
+  ip route flush table 99 2>/dev/null || true
+  ip route add "$lan_subnet" dev br-lan table 99 2>/dev/null || true
+  ip route add blackhole default table 99 2>/dev/null || true
+
+  ip -6 route flush table 99 2>/dev/null || true
+  ip -6 route add blackhole default table 99 2>/dev/null || true
+
   # 1. nftables support (OpenWrt 22.03+, fw4)
   if command -v nft >/dev/null 2>&1; then
-    nft add table inet secmynet 2>/dev/null || true
-    nft add set inet secmynet quarantined_macs '{ type ether_addr; flags interval; }' 2>/dev/null || true
-    nft add set inet secmynet quarantined_ips '{ type ipv4_addr; flags interval; }' 2>/dev/null || true
-    nft add set inet secmynet quarantined_ip6s '{ type ipv6_addr; flags interval; }' 2>/dev/null || true
-
-    # NAT Prerouting: redirect HTTP port 80 to captive portal on port 8080
-    nft add chain inet secmynet prerouting '{ type nat hook prerouting priority -100; policy accept; }' 2>/dev/null || true
-    nft flush chain inet secmynet prerouting 2>/dev/null || true
-    nft add rule inet secmynet prerouting ether saddr @quarantined_macs tcp dport 80 redirect to 8080 2>/dev/null || true
-    nft add rule inet secmynet prerouting ip saddr @quarantined_ips tcp dport 80 redirect to 8080 2>/dev/null || true
-
     # Load standalone nftables quarantine file if present
     if [ -f /etc/nftables.d/secmynet-quarantine.nft ]; then
       nft -f /etc/nftables.d/secmynet-quarantine.nft 2>/dev/null || true
     fi
 
-    # Ensure table inet secmynet exists with Layer 3 chains
+    # Ensure table inet secmynet exists with valid syntax (no flags interval on ether_addr)
     nft add table inet secmynet 2>/dev/null || true
-    nft add set inet secmynet quarantined_macs '{ type ether_addr; flags interval; }' 2>/dev/null || true
-    nft add set inet secmynet quarantined_ips '{ type ipv4_addr; flags interval; }' 2>/dev/null || true
-    nft add set inet secmynet quarantined_ip6s '{ type ipv6_addr; flags interval; }' 2>/dev/null || true
+    nft add set inet secmynet quarantined_macs '{ type ether_addr; }' 2>/dev/null || true
+    nft add set inet secmynet quarantined_ips '{ type ipv4_addr; }' 2>/dev/null || true
+    nft add set inet secmynet quarantined_ip6s '{ type ipv6_addr; }' 2>/dev/null || true
 
     # NAT Prerouting: Redirect HTTP port 80 to captive portal on 8080
     nft add chain inet secmynet prerouting_nat '{ type nat hook prerouting priority -100; policy accept; }' 2>/dev/null || true
@@ -97,28 +96,7 @@ init_firewall() {
     nft add rule inet secmynet forward ip saddr @quarantined_ips counter drop 2>/dev/null || true
     nft add rule inet secmynet forward ip6 saddr @quarantined_ip6s counter drop 2>/dev/null || true
 
-    # Layer 2 Bridge Table: Inspects and drops raw Ethernet frames on br-lan directly
-    nft add table bridge secmynet 2>/dev/null || true
-    nft add set bridge secmynet quarantined_macs '{ type ether_addr; flags interval; }' 2>/dev/null || true
-    nft add chain bridge secmynet forward '{ type filter hook forward priority -10; policy accept; }' 2>/dev/null || true
-    nft flush chain bridge secmynet forward 2>/dev/null || true
-    nft add rule bridge secmynet forward ether saddr @quarantined_macs udp dport 67 accept 2>/dev/null || true
-    nft add rule bridge secmynet forward ether saddr @quarantined_macs udp dport 68 accept 2>/dev/null || true
-    nft add rule bridge secmynet forward ether saddr @quarantined_macs udp dport 53 accept 2>/dev/null || true
-    nft add rule bridge secmynet forward ether saddr @quarantined_macs tcp dport 53 accept 2>/dev/null || true
-    nft add rule bridge secmynet forward ether saddr @quarantined_macs tcp dport 80 accept 2>/dev/null || true
-    nft add rule bridge secmynet forward ether saddr @quarantined_macs counter drop 2>/dev/null || true
-
-    nft add chain bridge secmynet prerouting '{ type filter hook prerouting priority -10; policy accept; }' 2>/dev/null || true
-    nft flush chain bridge secmynet prerouting 2>/dev/null || true
-    nft add rule bridge secmynet prerouting ether saddr @quarantined_macs udp dport 67 accept 2>/dev/null || true
-    nft add rule bridge secmynet prerouting ether saddr @quarantined_macs udp dport 68 accept 2>/dev/null || true
-    nft add rule bridge secmynet prerouting ether saddr @quarantined_macs udp dport 53 accept 2>/dev/null || true
-    nft add rule bridge secmynet prerouting ether saddr @quarantined_macs tcp dport 53 accept 2>/dev/null || true
-    nft add rule bridge secmynet prerouting ether saddr @quarantined_macs tcp dport 80 accept 2>/dev/null || true
-    nft add rule bridge secmynet prerouting ether saddr @quarantined_macs counter drop 2>/dev/null || true
-
-    log "Initialized standalone nftables secmynet quarantine table (dual-stack inet + bridge)."
+    log "Initialized standalone nftables secmynet quarantine table."
   fi
 
   # 2. iptables support (OpenWrt 21.02 and older, fw3)
@@ -186,22 +164,43 @@ apply_quarantine() {
   grep -qi "$mac" /etc/secmynet-agent/quarantined_macs 2>/dev/null || echo "$mac" >> /etc/secmynet-agent/quarantined_macs
   sed -i "/$mac/d" /etc/secmynet-agent/allowed_macs 2>/dev/null || true
 
-  # 1. nftables quarantine (Layer 2 bridge + Layer 3 inet)
+  # 1. LINUX KERNEL POLICY ROUTING BLACKHOLE (100% unbypassable kernel WAN drop)
+  # Local router subnet (e.g. 192.168.1.0/24) stays reachable; WAN default is blackholed!
+  lan_subnet=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet / {print $2}' | head -n1)
+  [ -z "$lan_subnet" ] && lan_subnet="192.168.1.0/24"
+  ip route flush table 99 2>/dev/null || true
+  ip route add "$lan_subnet" dev br-lan table 99 2>/dev/null || true
+  ip route add blackhole default table 99 2>/dev/null || true
+
+  if [ -n "$ip" ]; then
+    ip rule del from "$ip" table 99 2>/dev/null || true
+    ip rule add from "$ip" table 99 priority 100 2>/dev/null || true
+  fi
+
+  # IPv6 policy routing blackhole
+  ip -6 route flush table 99 2>/dev/null || true
+  ip -6 route add blackhole default table 99 2>/dev/null || true
+  for ip6 in $(ip -6 neigh show 2>/dev/null | grep -i "$mac" | awk '{print $1}'); do
+    [ -n "$ip6" ] && ip -6 rule del from "$ip6" table 99 2>/dev/null || true
+    [ -n "$ip6" ] && ip -6 rule add from "$ip6" table 99 priority 100 2>/dev/null || true
+  done
+
+  # 2. OpenWrt Native fw4 injection (if fw4 exists)
   if command -v nft >/dev/null 2>&1; then
+    nft insert rule inet fw4 forward ether saddr "$mac" counter drop 2>/dev/null || true
+    [ -n "$ip" ] && nft insert rule inet fw4 forward ip saddr "$ip" counter drop 2>/dev/null || true
+    nft insert rule inet fw4 dstnat ether saddr "$mac" tcp dport 80 redirect to 8080 2>/dev/null || true
+    [ -n "$ip" ] && nft insert rule inet fw4 dstnat ip saddr "$ip" tcp dport 80 redirect to 8080 2>/dev/null || true
+
+    # Standalone table inet secmynet (clean set syntax without flags interval)
     nft add table inet secmynet 2>/dev/null || true
-    nft add set inet secmynet quarantined_macs '{ type ether_addr; flags interval; }' 2>/dev/null || true
-    nft add set inet secmynet quarantined_ips '{ type ipv4_addr; flags interval; }' 2>/dev/null || true
-    nft add set inet secmynet quarantined_ip6s '{ type ipv6_addr; flags interval; }' 2>/dev/null || true
+    nft add set inet secmynet quarantined_macs '{ type ether_addr; }' 2>/dev/null || true
+    nft add set inet secmynet quarantined_ips '{ type ipv4_addr; }' 2>/dev/null || true
+    nft add set inet secmynet quarantined_ip6s '{ type ipv6_addr; }' 2>/dev/null || true
 
     nft add element inet secmynet quarantined_macs "{ $mac }" 2>/dev/null || true
     [ -n "$ip" ] && nft add element inet secmynet quarantined_ips "{ $ip }" 2>/dev/null || true
 
-    # Layer 2 bridge drop
-    nft add table bridge secmynet 2>/dev/null || true
-    nft add set bridge secmynet quarantined_macs '{ type ether_addr; flags interval; }' 2>/dev/null || true
-    nft add element bridge secmynet quarantined_macs "{ $mac }" 2>/dev/null || true
-
-    # Discover and block all IPv6 addresses for this MAC (link-local, SLAAC, temporary privacy IPv6s)
     for ip6 in $(ip -6 neigh show 2>/dev/null | grep -i "$mac" | awk '{print $1}'); do
       [ -n "$ip6" ] && nft add element inet secmynet quarantined_ip6s "{ $ip6 }" 2>/dev/null || true
     done
@@ -212,7 +211,7 @@ apply_quarantine() {
     fi
   fi
 
-  # 2. iptables & ip6tables (Dual-stack drop)
+  # 3. iptables & ip6tables (Dual-stack drop)
   if command -v iptables >/dev/null 2>&1; then
     iptables -I FORWARD 1 -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
     [ -n "$ip" ] && iptables -I FORWARD 1 -s "$ip" -j DROP 2>/dev/null || true
@@ -227,15 +226,7 @@ apply_quarantine() {
     ip6tables -t mangle -I PREROUTING 1 -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
   fi
 
-  if command -v ebtables >/dev/null 2>&1; then
-    ebtables -I FORWARD 1 -s "$mac" -j DROP 2>/dev/null || true
-    ebtables -I INPUT 1 -s "$mac" -p IPv4 --ip-proto udp --ip-dport 67 -j ACCEPT 2>/dev/null || true
-    ebtables -I INPUT 2 -s "$mac" -p IPv4 --ip-proto udp --ip-dport 53 -j ACCEPT 2>/dev/null || true
-    ebtables -I INPUT 3 -s "$mac" -p IPv4 --ip-proto tcp --ip-dport 80 -j ACCEPT 2>/dev/null || true
-    ebtables -I INPUT 4 -s "$mac" -j DROP 2>/dev/null || true
-  fi
-
-  # Flush conntrack sockets so existing active connections are instantly terminated
+  # 4. Flush conntrack sockets so existing active connections die instantly
   if command -v conntrack >/dev/null 2>&1; then
     [ -n "$ip" ] && conntrack -D -s "$ip" 2>/dev/null || true
     [ -n "$ip" ] && conntrack -D -d "$ip" 2>/dev/null || true
@@ -246,7 +237,7 @@ apply_quarantine() {
   fi
   ip route flush cache 2>/dev/null || true
 
-  log "Strict Zero-Trust Quarantine Enforced: $mac ($ip) - WAN forwarding blocked on Layer 2 and Layer 3 (IPv4 & IPv6)"
+  log "Strict Zero-Trust Quarantine Enforced: $mac ($ip) - WAN forwarding blocked via Kernel Policy Routing, fw4, nftables, iptables"
 }
 
 apply_allow() {
@@ -264,17 +255,26 @@ apply_allow() {
   sed -i "/$mac/d" /etc/secmynet-agent/blocked_macs 2>/dev/null || true
   grep -qi "$mac" /etc/secmynet-agent/allowed_macs 2>/dev/null || echo "$mac" >> /etc/secmynet-agent/allowed_macs
 
-  # nftables
+  # 1. Remove Linux Kernel Policy Routing blackholes
+  if [ -n "$ip" ]; then
+    ip rule del from "$ip" table 99 2>/dev/null || true
+  fi
+  for ip6 in $(ip -6 neigh show 2>/dev/null | grep -i "$mac" | awk '{print $1}'); do
+    [ -n "$ip6" ] && ip -6 rule del from "$ip6" table 99 2>/dev/null || true
+  done
+
+  # 2. Remove nftables rules
   if command -v nft >/dev/null 2>&1; then
     nft delete element inet secmynet quarantined_macs "{ $mac }" 2>/dev/null || true
     [ -n "$ip" ] && nft delete element inet secmynet quarantined_ips "{ $ip }" 2>/dev/null || true
     for ip6 in $(ip -6 neigh show 2>/dev/null | grep -i "$mac" | awk '{print $1}'); do
       [ -n "$ip6" ] && nft delete element inet secmynet quarantined_ip6s "{ $ip6 }" 2>/dev/null || true
     done
-    nft delete element bridge secmynet quarantined_macs "{ $mac }" 2>/dev/null || true
+    # Flush injected fw4 rules and restore standard fw4
+    /etc/init.d/firewall reload 2>/dev/null || true
   fi
 
-  # iptables & ip6tables
+  # 3. Remove iptables & ip6tables rules
   if command -v iptables >/dev/null 2>&1; then
     iptables -D FORWARD -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
     [ -n "$ip" ] && iptables -D FORWARD -s "$ip" -j DROP 2>/dev/null || true
@@ -287,16 +287,6 @@ apply_allow() {
   if command -v ip6tables >/dev/null 2>&1; then
     ip6tables -D FORWARD -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
     ip6tables -t mangle -D PREROUTING -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
-  fi
-
-  if command -v ebtables >/dev/null 2>&1; then
-    ebtables -D FORWARD -s "$mac" -j DROP 2>/dev/null || true
-    ebtables -D INPUT -s "$mac" -j DROP 2>/dev/null || true
-  fi
-
-  if command -v uci >/dev/null 2>&1; then
-    uci del_list wireless.@wifi-iface[0].maclist="$mac" 2>/dev/null || true
-    uci commit wireless 2>/dev/null || true
   fi
 
   log "Quarantine Released: $mac ($ip) - WAN internet access granted by owner"

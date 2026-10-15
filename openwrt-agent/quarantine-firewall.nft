@@ -9,19 +9,16 @@
 table inet secmynet {
     set quarantined_macs {
         type ether_addr
-        flags interval
         comment "SecMyNet quarantined client MACs pending owner approval"
     }
 
     set quarantined_ips {
         type ipv4_addr
-        flags interval
         comment "SecMyNet quarantined client IPv4s pending owner approval"
     }
 
     set quarantined_ip6s {
         type ipv6_addr
-        flags interval
         comment "SecMyNet quarantined client IPv6s pending owner approval"
     }
 
@@ -77,7 +74,6 @@ table inet secmynet {
 table bridge secmynet {
     set quarantined_macs {
         type ether_addr
-        flags interval
         comment "SecMyNet Layer 2 quarantined MACs"
     }
 
