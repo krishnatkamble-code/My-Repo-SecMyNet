@@ -403,6 +403,10 @@ async function releaseQuarantinedDevice(notificationId) {
     }
   }
 
+  if (device && notification.user_id) {
+    disallowedStationUserIds.delete(`${device.id}:${notification.user_id}`);
+  }
+
   await run("UPDATE notifications SET status = 'allowed' WHERE id = $1", [notification.id]);
   console.log(`Device for notification ${notificationId} successfully released from quarantine.`);
   return true;
@@ -415,6 +419,10 @@ async function denyAndDisconnectDevice(notificationId, reason = 'denied') {
 
   const device = await get('SELECT * FROM devices WHERE id = $1', [notification.device_id]);
   if (device) {
+    if (notification.user_id) {
+      disallowedStationUserIds.add(`${device.id}:${notification.user_id}`);
+    }
+
     const allowedUsers = parseAllowedUsers(device.allowed_user_ids).filter(uid => uid !== notification.user_id);
     await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(allowedUsers), device.id]);
 
@@ -447,10 +455,13 @@ async function denyAndDisconnectDevice(notificationId, reason = 'denied') {
   return true;
 }
 
+// In-memory set to track stations that are currently disallowed and continuously associated
+const disallowedStationUserIds = new Set();
 // In-memory map to track when each station was last actively observed in telemetry
 // Key: `${deviceId}:${userId}`, Value: timestamp (Date.now())
 const clientLastSeenMap = new Map();
 const DISCONNECT_GRACE_PERIOD_MS = (process.env.NODE_ENV === 'test' || process.execArgv.includes('--test') || process.argv.some(a => a.includes('test'))) ? 500 : 45000;
+
 
 // Process telemetry from OpenWrt agents: persist per-client usage records so the
 // server can calculate deltas, trigger notifications, and build usage history.
@@ -597,31 +608,30 @@ async function processTelemetry(routerId, clients = [], usage = []) {
             [userId, device.id]
           );
 
+          const clientKey = `${device.id}:${userId}`;
           // Check if this client was already auto-disallowed (5-minute timeout) or denied by owner
           const existingDisallowedNotification = await get(
             "SELECT id, status, created_at FROM notifications WHERE type = 'connection_request' AND user_id = $1 AND device_id = $2 AND status IN ('quarantine_auto_denied', 'denied') ORDER BY created_at DESC LIMIT 1",
             [userId, device.id]
           );
 
-          // Obey user requirement: "or max 5 min then directly disallow client & no repeat request message should be shown thereafter 5 minutes."
-          if (existingDisallowedNotification) {
-            const timeSinceDisallow = Date.now() - new Date(existingDisallowedNotification.created_at).getTime();
-            if (timeSinceDisallow < 300000) {
-              // Client was disallowed within 5 minutes (or is still continuously present on the router).
-              // Keep them directly disallowed at router firewall, but DO NOT create any repeat notification or popup request message!
-              const queuedQuarantineCmd = await get(
-                "SELECT id FROM openwrt_commands WHERE router_id = $1 AND command_type IN ('quarantine', 'block') AND status = 'queued' AND payload_json LIKE $2",
-                [routerId, `%"mac":"${mac}"%`]
+          // Obey user requirement: "client getting access to internet & repeat reuest is stricly denied till the disconnection and conneccting again to router."
+          if (disallowedStationUserIds.has(clientKey) || existingDisallowedNotification) {
+            disallowedStationUserIds.add(clientKey);
+            // Client is disallowed and still present on the router. Keep them directly quarantined/blocked at router firewall,
+            // and STRICTLY DO NOT create any repeat notification or popup request message!
+            const queuedQuarantineCmd = await get(
+              "SELECT id FROM openwrt_commands WHERE router_id = $1 AND command_type IN ('quarantine', 'block') AND status = 'queued' AND payload_json LIKE $2",
+              [routerId, `%"mac":"${mac}"%`]
+            );
+            if (!queuedQuarantineCmd) {
+              await run(
+                `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+                 VALUES ($1, $2, 'quarantine', $3, 'queued', NOW())`,
+                [makeId('openwrt-command'), routerId, JSON.stringify({ mac, ip })]
               );
-              if (!queuedQuarantineCmd) {
-                await run(
-                  `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
-                   VALUES ($1, $2, 'quarantine', $3, 'queued', NOW())`,
-                  [makeId('openwrt-command'), routerId, JSON.stringify({ mac, ip })]
-                );
-              }
-              continue; // Do NOT create a repeat request or notification message!
             }
+            continue; // Strictly DENY repeat requests while continuously connected!
           }
 
           if (!existingPendingNotification) {
@@ -648,6 +658,10 @@ async function processTelemetry(routerId, clients = [], usage = []) {
             } else {
               notifMessage = `New device detected: ${displayName} [${mac}]. Quarantined pending owner approval.`;
             }
+
+            // Obey user requirement: "For one client there should only one request which may be present only in one of the four states/catogories"
+            // Clear any stale notification row for this client on this device so there is strictly ONE request per client in DB:
+            await run('DELETE FROM notifications WHERE user_id = $1 AND device_id = $2', [userId, device.id]);
 
             await createNotification({
               type: 'connection_request',
@@ -692,6 +706,7 @@ async function processTelemetry(routerId, clients = [], usage = []) {
             continue; // Station is temporarily asleep (power save mode); keep connection and notification intact!
           }
           clientLastSeenMap.delete(`${device.id}:${conn.user_id}`);
+          disallowedStationUserIds.delete(`${device.id}:${conn.user_id}`);
 
           await run("UPDATE connections SET status = 'disconnected', disconnected_at = NOW() WHERE id = $1", [conn.id]);
 
@@ -1369,7 +1384,15 @@ app.get('/api/notifications', authRequired, adminRequired, async (_req, res) => 
     LEFT JOIN locations l ON l.id = n.location_id
     ORDER BY n.created_at DESC
   `);
-  res.json({ notifications });
+  // Ensure strict uniqueness: at most ONE request per client in the response
+  const clientMap = new Map();
+  for (const n of notifications || []) {
+    const key = n.user_id || n.id;
+    if (!clientMap.has(key)) {
+      clientMap.set(key, n);
+    }
+  }
+  res.json({ notifications: Array.from(clientMap.values()) });
 });
 
 // Register push token for the authenticated user
@@ -1566,12 +1589,26 @@ app.post('/api/openwrt/routers/:routerId/commands/:commandId/complete', routerAg
 app.delete('/api/notifications', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
   const { tab } = req.query;
+  const now = Date.now();
   if (tab === 'history' || tab === 'disallowed') {
     await run("DELETE FROM notifications WHERE status IN ('denied', 'disconnected', 'quarantine_auto_denied')");
-  } else if (tab === 'approved') {
+  } else if (tab === 'approved' || tab === 'allowed') {
     await run("DELETE FROM notifications WHERE status = 'allowed'");
+  } else if (tab === 'temp_quarantine') {
+    const allNotifs = await all("SELECT id, status, created_at FROM notifications WHERE status = 'quarantine'");
+    for (const n of allNotifs || []) {
+      if ((now - new Date(n.created_at).getTime()) < 45000) {
+        await run('DELETE FROM notifications WHERE id = $1', [n.id]);
+      }
+    }
   } else if (tab === 'pending') {
-    await run("DELETE FROM notifications WHERE status IN ('unread', 'quarantine', 'quarantine_wait', 'approved_holding')");
+    const allNotifs = await all("SELECT id, status, created_at FROM notifications WHERE status IN ('unread', 'quarantine', 'quarantine_wait', 'approved_holding')");
+    for (const n of allNotifs || []) {
+      const age = now - new Date(n.created_at).getTime();
+      if (n.status !== 'quarantine' || age >= 45000) {
+        await run('DELETE FROM notifications WHERE id = $1', [n.id]);
+      }
+    }
   } else {
     await run('DELETE FROM notifications');
   }
@@ -2110,17 +2147,28 @@ app.get('/api/client/status', async (req, res) => {
     holdRemainingSeconds = Math.max(0, Math.ceil((minHold - now) / 1000));
     timeoutRemainingSeconds = Math.max(0, Math.ceil((expires - now) / 1000));
 
+    let category = 'temp_quarantine';
+    let internetService = 'OFF';
+
     if (status === 'allowed') {
       approved = true;
+      category = 'allowed';
+      internetService = 'ON';
       message = 'Access Approved by Owner! You are now connected to the Internet.';
-    } else if (['denied', 'quarantine_auto_denied'].includes(status)) {
+    } else if (['denied', 'quarantine_auto_denied', 'disconnected'].includes(status)) {
       approved = false;
-      message = 'Connection request has been disallowed by the router owner.';
-    } else if (status === 'approved_holding') {
+      category = 'disallowed';
+      internetService = 'OFF';
+      message = 'Connection request has been disallowed by the router owner. Internet service is completely off.';
+    } else if (status === 'quarantine_wait' || holdRemainingSeconds === 0) {
       approved = false;
-      message = `Owner approved your connection! Security hold in progress (${holdRemainingSeconds}s remaining).`;
+      category = 'pending';
+      internetService = 'OFF';
+      message = 'Service Approval pending from owner of the Router (Pending Approvals). Internet service is completely off.';
     } else {
       approved = false;
+      category = 'temp_quarantine';
+      internetService = 'OFF';
       message = 'Service Approval pending from owner of the Router';
     }
   } else if (activeConn && activeConn.status === 'connected') {
@@ -2129,11 +2177,16 @@ app.get('/api/client/status', async (req, res) => {
     message = 'Access Approved by Owner! You are now connected to the Internet.';
   }
 
+  const category = approved ? 'allowed' : (['denied', 'quarantine_auto_denied', 'disconnected'].includes(status) ? 'disallowed' : (holdRemainingSeconds > 0 ? 'temp_quarantine' : 'pending'));
+  const internetService = approved ? 'ON' : 'OFF';
+
   res.json({
     mac,
     ip,
     name: user ? user.name : (mac ? `Client (${mac.toUpperCase()})` : 'Connected Device'),
     status,
+    category,
+    internetService,
     message,
     approved,
     holdRemainingSeconds,

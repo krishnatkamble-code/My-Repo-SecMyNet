@@ -69,31 +69,3 @@ table inet secmynet {
         ip6 saddr @quarantined_ip6s counter drop
     }
 }
-
-# Layer 2 Bridge Table (directly inspects and drops raw Ethernet frames on br-lan)
-table bridge secmynet {
-    set quarantined_macs {
-        type ether_addr
-        comment "SecMyNet Layer 2 quarantined MACs"
-    }
-
-    chain forward {
-        type filter hook forward priority -10; policy accept;
-        ether saddr @quarantined_macs udp dport 67 accept
-        ether saddr @quarantined_macs udp dport 68 accept
-        ether saddr @quarantined_macs udp dport 53 accept
-        ether saddr @quarantined_macs tcp dport 53 accept
-        ether saddr @quarantined_macs tcp dport 80 accept
-        ether saddr @quarantined_macs counter drop
-    }
-
-    chain prerouting {
-        type filter hook prerouting priority -10; policy accept;
-        ether saddr @quarantined_macs udp dport 67 accept
-        ether saddr @quarantined_macs udp dport 68 accept
-        ether saddr @quarantined_macs udp dport 53 accept
-        ether saddr @quarantined_macs tcp dport 53 accept
-        ether saddr @quarantined_macs tcp dport 80 accept
-        ether saddr @quarantined_macs counter drop
-    }
-}

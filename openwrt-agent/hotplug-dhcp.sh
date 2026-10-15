@@ -14,28 +14,29 @@ logger -t secmynet-hotplug "DHCP lease event: $ACTION for $MAC ($IP, $HOST)"
 
 mkdir -p /etc/secmynet-agent
 
-# If client is not explicitly in allowed_macs, immediately enforce local zero-latency quarantine
-if ! grep -qi "$MAC" /etc/secmynet-agent/allowed_macs 2>/dev/null; then
-  grep -qi "$MAC" /etc/secmynet-agent/quarantined_macs 2>/dev/null || echo "$MAC" >> /etc/secmynet-agent/quarantined_macs
+# Zero-Trust Quarantine-First: Any DHCP lease is a connection attempt.
+# Clear any stale allow records and immediately enforce local zero-latency quarantine!
+sed -i "/$MAC/d" /etc/secmynet-agent/allowed_macs 2>/dev/null || true
+grep -qi "$MAC" /etc/secmynet-agent/quarantined_macs 2>/dev/null || echo "$MAC" >> /etc/secmynet-agent/quarantined_macs
 
-  # 1. LINUX KERNEL POLICY ROUTING BLACKHOLE (100% unbypassable kernel WAN drop)
-  lan_subnet=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet / {print $2}' | head -n1)
-  [ -z "$lan_subnet" ] && lan_subnet="192.168.1.0/24"
-  ip route flush table 99 2>/dev/null || true
-  ip route add "$lan_subnet" dev br-lan table 99 2>/dev/null || true
-  ip route add blackhole default table 99 2>/dev/null || true
+# 1. LINUX KERNEL POLICY ROUTING BLACKHOLE (100% unbypassable kernel WAN drop)
+lan_subnet=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet / {print $2}' | head -n1)
+[ -z "$lan_subnet" ] && lan_subnet="192.168.1.0/24"
+ip route flush table 99 2>/dev/null || true
+ip route add "$lan_subnet" dev br-lan table 99 2>/dev/null || true
+ip route add blackhole default table 99 2>/dev/null || true
 
-  if [ -n "$IP" ]; then
-    ip rule del from "$IP" table 99 2>/dev/null || true
-    ip rule add from "$IP" table 99 priority 100 2>/dev/null || true
-  fi
+if [ -n "$IP" ]; then
+  ip rule del from "$IP" table 99 2>/dev/null || true
+  ip rule add from "$IP" table 99 priority 1 2>/dev/null || true
+fi
 
-  ip -6 route flush table 99 2>/dev/null || true
-  ip -6 route add blackhole default table 99 2>/dev/null || true
-  for ip6 in $(ip -6 neigh show 2>/dev/null | grep -i "$MAC" | awk '{print $1}'); do
-    [ -n "$ip6" ] && ip -6 rule del from "$ip6" table 99 2>/dev/null || true
-    [ -n "$ip6" ] && ip -6 rule add from "$ip6" table 99 priority 100 2>/dev/null || true
-  done
+ip -6 route flush table 99 2>/dev/null || true
+ip -6 route add blackhole default table 99 2>/dev/null || true
+for ip6 in $(ip -6 neigh show 2>/dev/null | grep -i "$MAC" | awk '{print $1}'); do
+  [ -n "$ip6" ] && ip -6 rule del from "$ip6" table 99 2>/dev/null || true
+  [ -n "$ip6" ] && ip -6 rule add from "$ip6" table 99 priority 1 2>/dev/null || true
+done
 
   # 2. Native fw4 injection (OpenWrt fw4)
   if command -v nft >/dev/null 2>&1; then
@@ -79,7 +80,6 @@ if ! grep -qi "$MAC" /etc/secmynet-agent/allowed_macs 2>/dev/null; then
   ip route flush cache 2>/dev/null || true
 
   logger -t secmynet-hotplug "Client $MAC ($IP) placed in immediate zero-latency local quarantine."
-fi
 
 # 4. Trigger SecMyNet agent in background to notify cloud server and owner
 if [ -f /etc/secmynet-agent/agent.sh ]; then
@@ -89,3 +89,4 @@ elif [ -x /usr/bin/secmynet-agent ]; then
 elif [ -f /root/agent.sh ]; then
   /bin/sh /root/agent.sh --event "$ACTION" "$MAC" "$IP" "$HOST" >/dev/null 2>&1 &
 fi
+

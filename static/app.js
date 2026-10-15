@@ -136,19 +136,72 @@ function renderManage() { const rows = state.data.locations.map((location) => { 
 let notificationsLiveTimer = null;
 function renderNotifications() {
   if (notificationsLiveTimer) { clearInterval(notificationsLiveTimer); notificationsLiveTimer = null; }
-  state.notificationTab = state.notificationTab || 'pending';
   const now = Date.now();
 
-  const allItems = state.notifications || [];
-  const pendingItems = allItems.filter((n) => n.type === 'connection_request' && ['unread', 'quarantine', 'quarantine_wait', 'approved_holding'].includes(n.status));
-  const approvedItems = allItems.filter((n) => n.status === 'allowed');
-  const disallowedItems = allItems.filter((n) => ['denied', 'quarantine_auto_denied', 'disconnected'].includes(n.status) || (n.type === 'overconsumption' && n.status !== 'allowed'));
+  // Deduplicate by client key (user_id || id) so that for each client, exactly ONE request is present in only one of the four states:
+  const clientMap = new Map();
+  for (const n of state.notifications || []) {
+    const key = n.user_id || n.id;
+    if (!clientMap.has(key)) {
+      clientMap.set(key, n);
+    }
+  }
+  const deduplicatedItems = Array.from(clientMap.values());
+
+  // 4 Mutually Exclusive States:
+  // State a) 45 sec temp quarantine:
+  const tempQuarantineItems = deduplicatedItems.filter((n) => {
+    if (n.type !== 'connection_request') return false;
+    if (n.status !== 'quarantine') return false;
+    const age = now - new Date(n.created_at).getTime();
+    return age < 45000;
+  });
+
+  // State b) pending:
+  const pendingItems = deduplicatedItems.filter((n) => {
+    if (n.type !== 'connection_request') return false;
+    if (n.status === 'quarantine_wait' || n.status === 'unread' || n.status === 'approved_holding') return true;
+    if (n.status === 'quarantine') {
+      const age = now - new Date(n.created_at).getTime();
+      return age >= 45000;
+    }
+    return false;
+  });
+
+  // State c) allowed:
+  const allowedItems = deduplicatedItems.filter((n) => n.status === 'allowed');
+
+  // State d) dis-allowed:
+  const disallowedItems = deduplicatedItems.filter((n) => {
+    return ['denied', 'quarantine_auto_denied', 'disconnected'].includes(n.status) || (n.type === 'overconsumption' && n.status !== 'allowed');
+  });
+
+  // Default to appropriate tab if not set or invalid
+  if (!state.notificationTab || !['temp_quarantine', 'pending', 'allowed', 'disallowed'].includes(state.notificationTab)) {
+    if (tempQuarantineItems.length > 0) state.notificationTab = 'temp_quarantine';
+    else if (pendingItems.length > 0) state.notificationTab = 'pending';
+    else if (allowedItems.length > 0) state.notificationTab = 'allowed';
+    else state.notificationTab = 'temp_quarantine';
+  }
+
+  const tempQuarantineRows = tempQuarantineItems.map((n) => {
+    const isReturning = (n.message || '').includes('Returning user');
+    const elapsedSec = Math.floor((now - new Date(n.created_at).getTime()) / 1000);
+    const reviewRemaining = Math.max(0, 45 - elapsedSec);
+    const expires = n.expires_at ? new Date(n.expires_at).getTime() : (new Date(n.created_at).getTime() + 300000);
+    const timeoutRemaining = Math.max(0, Math.ceil((expires - now) / 1000));
+    const mins = Math.floor(timeoutRemaining / 60);
+    const secs = String(timeoutRemaining % 60).padStart(2, '0');
+
+    const actions = `<button class="action-button" style="background:#166534;color:#fff;font-weight:700;" data-notification-response="${n.id}|allow" title="Turn Internet ON">✅ Allow Access (Internet ON)</button><button class="action-button" style="background:#d97706;color:#fff;font-weight:600;" data-notification-response="${n.id}|wait" title="Move to Pending Approvals">⏳ Move to Pending (Internet OFF)</button><button class="action-button danger" data-notification-response="${n.id}|deny">🚫 Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+    const typeBadge = isReturning ? '<span class="status-badge" style="background:#e0f2fe;color:#0369a1;font-size:0.72rem;margin-left:6px;">Returning Client</span>' : '';
+    return `<tr><td>Temp Quarantine${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong><br><small style="color:#b91c1c;font-weight:700;">🔴 Internet Service: COMPLETELY OFF</small> · <small style="color:#0284c7;font-weight:700;">⏱️ 45s Review: ${reviewRemaining}s left (moves to Pending at 0s)</small> · <small style="color:#b45309;">⏳ 5m Auto-Disallow: ${mins}m ${secs}s</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+  }).join('');
 
   const pendingRows = pendingItems.map((n) => {
     const isReturning = (n.message || '').includes('Returning user');
-    const expires = n.expires_at ? new Date(n.expires_at).getTime() : (now + 300000);
+    const expires = n.expires_at ? new Date(n.expires_at).getTime() : (new Date(n.created_at).getTime() + 300000);
     const timeoutRemaining = Math.max(0, Math.ceil((expires - now) / 1000));
-    const ageSec = Math.floor((now - new Date(n.created_at).getTime()) / 1000);
     const mins = Math.floor(timeoutRemaining / 60);
     const secs = String(timeoutRemaining % 60).padStart(2, '0');
 
@@ -156,56 +209,61 @@ function renderNotifications() {
     if (timeoutRemaining === 0) {
       actions = `<span class="status-badge blocked">Disallowed (5m Timeout)</span>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;margin-left:6px;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
     } else {
-      const waitLabel = ageSec >= 45 ? `Pending (${Math.floor(ageSec / 60)}m ${ageSec % 60}s)` : `Review (${45 - ageSec}s)`;
-      actions = `<span class="status-badge" style="background:#fef3c7;color:#92400e;font-size:0.75rem;margin-right:6px;">${waitLabel}</span><button class="action-button" style="background:#166534;color:#fff;font-weight:600;" data-notification-response="${n.id}|allow">Allow Access</button><button class="action-button" style="background:#f59e0b;color:#fff;" data-notification-response="${n.id}|wait">Wait (5m)</button><button class="action-button danger" data-notification-response="${n.id}|deny">Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+      actions = `<button class="action-button" style="background:#166534;color:#fff;font-weight:700;" data-notification-response="${n.id}|allow" title="Turn Internet ON">✅ Allow Access (Internet ON)</button><button class="action-button danger" data-notification-response="${n.id}|deny">🚫 Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
     }
     const typeBadge = isReturning ? '<span class="status-badge" style="background:#e0f2fe;color:#0369a1;font-size:0.72rem;margin-left:6px;">Returning Client</span>' : '';
-    return `<tr><td>Connection request${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong><small style="color:#b45309;">⏳ Auto-disconnects in ${mins}m ${secs}s if unapproved</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+    return `<tr><td>Pending approval${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong><br><small style="color:#b91c1c;font-weight:700;">🔴 Internet Service: COMPLETELY OFF</small> · <small style="color:#b45309;font-weight:700;">⏳ Auto-disconnects in ${mins}m ${secs}s if unapproved</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
   }).join('');
 
-  const approvedRows = approvedItems.map((n) => {
+  const approvedRows = allowedItems.map((n) => {
     const isReturning = (n.message || '').includes('Returning user');
     const typeBadge = isReturning ? '<span class="status-badge" style="background:#e0f2fe;color:#0369a1;font-size:0.72rem;margin-left:6px;">Returning Client</span>' : '';
-    const actions = `<button class="action-button danger" data-notification-response="${n.id}|disconnect">Disconnect</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">View History</button>` : ''}<button class="action-button secondary" data-notification-clear="${n.id}">Clear</button>`;
-    return `<tr><td>Approved access${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong><span class="status-badge allowed" style="margin-left:6px;">Allowed / Online</span></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+    const actions = `<button class="action-button danger" data-notification-response="${n.id}|disconnect">Disconnect / Revoke Access</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">View History</button>` : ''}<button class="action-button secondary" data-notification-clear="${n.id}">Clear</button>`;
+    return `<tr><td>Allowed / Online${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong><br><small style="color:#166534;font-weight:700;">🟢 Internet Service: ON (Full Internet Access Granted)</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
   }).join('');
 
   const disallowedRows = disallowedItems.map((n) => {
     const badgeCls = ['denied', 'disconnected', 'quarantine_auto_denied'].includes(n.status) ? 'blocked' : '';
-    const displayStatus = n.status === 'quarantine_auto_denied' ? 'Disallowed (5m Timeout)' : n.status.replace(/_/g, ' ');
-    const actions = `<button class="action-button" style="background:#166534;color:#fff;" data-notification-response="${n.id}|allow">Re-Allow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">View History</button>` : ''}<button class="action-button secondary" data-notification-clear="${n.id}">Clear</button>`;
-    return `<tr><td>Disallowed / Closed</td><td><strong>${escapeHtml(n.message)}</strong><span class="status-badge ${badgeCls}" style="margin-left:6px;">${escapeHtml(displayStatus)}</span></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+    const displayStatus = n.status === 'quarantine_auto_denied' ? 'Disallowed (5m Timeout)' : (n.status === 'denied' ? 'Disallowed by Owner' : n.status.replace(/_/g, ' '));
+    const actions = `<button class="action-button" style="background:#166534;color:#fff;font-weight:600;" data-notification-response="${n.id}|allow">Re-Allow Access</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">View History</button>` : ''}<button class="action-button secondary" data-notification-clear="${n.id}">Clear</button>`;
+    return `<tr><td>Disallowed / Blocked</td><td><strong>${escapeHtml(n.message)}</strong><span class="status-badge ${badgeCls}" style="margin-left:6px;">${escapeHtml(displayStatus)}</span><br><small style="color:#b91c1c;font-weight:700;">🔴 Internet Service: COMPLETELY OFF</small> · <small style="color:#475569;">Repeat request is strictly denied until client disconnects and reconnects</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
   }).join('');
 
   const activeTab = state.notificationTab;
   let activeContent = '';
   let activeIntro = '';
 
-  if (activeTab === 'pending') {
-    activeIntro = 'Category 1: Pending Approvals — Connection requests exceeding 45s review window or awaiting owner decision. Client has ZERO internet access until approved.';
-    activeContent = pendingItems.length ? table(['Type', 'Notification', 'Location', 'Requested Time', 'Actions'], pendingRows) : '<p class="empty">No pending connection requests. All clients have been reviewed.</p>';
-  } else if (activeTab === 'approved') {
-    activeIntro = 'Category 2: Approved Requests — Client devices approved by the owner with internet access granted.';
-    activeContent = approvedItems.length ? table(['Type', 'Notification', 'Location', 'Approved Time', 'Actions'], approvedRows) : '<p class="empty">No approved connection records.</p>';
+  if (activeTab === 'temp_quarantine') {
+    activeIntro = 'State a) 45-Second Temp Quarantine: Active connection requests in the 45-second owner popup review window. Internet service is COMPLETELY OFF. Client has zero internet access.';
+    activeContent = tempQuarantineItems.length ? table(['State', 'Notification & Timers', 'Location', 'Requested Time', 'Actions'], tempQuarantineRows) : '<p class="empty">No clients currently in 45s temp quarantine.</p>';
+  } else if (activeTab === 'pending') {
+    activeIntro = 'State b) Pending Approvals: Requests that exceeded the 45-second review window or were moved to pending. Internet service remains COMPLETELY OFF. Auto-disconnects after 5 minutes total if unapproved.';
+    activeContent = pendingItems.length ? table(['State', 'Notification & Countdown', 'Location', 'Requested Time', 'Actions'], pendingRows) : '<p class="empty">No pending connection requests awaiting approval.</p>';
+  } else if (activeTab === 'allowed') {
+    activeIntro = 'State c) Allowed Requests: Clients approved by the Owner. THIS IS THE ONLY STATE WHERE INTERNET ACCESS IS ACTIVE.';
+    activeContent = allowedItems.length ? table(['State', 'Notification & Access Status', 'Location', 'Approved Time', 'Actions'], approvedRows) : '<p class="empty">No approved connection records.</p>';
   } else {
-    activeIntro = 'Category 3: Disallowed / History — Devices that were disallowed, disconnected, or timed out.';
-    activeContent = disallowedItems.length ? table(['Type', 'Notification', 'Location', 'Time', 'Actions'], disallowedRows) : '<p class="empty">No disallowed or disconnected records.</p>';
+    activeIntro = 'State d) Disallowed Requests: Clients disallowed by Owner, auto-disallowed after 5m timeout, or disconnected. Internet service is COMPLETELY OFF. Repeat requests are strictly denied until disconnected.';
+    activeContent = disallowedItems.length ? table(['State', 'Notification & Status', 'Location', 'Time', 'Actions'], disallowedRows) : '<p class="empty">No disallowed or disconnected records.</p>';
   }
 
   const tabsHtml = `
-    <div class="notification-tabs" style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">
-      <button class="action-button ${activeTab === 'pending' ? 'active-tab' : ''}" data-notif-tab="pending" style="${activeTab === 'pending' ? 'background:#2d5aa8;color:#fff;font-weight:700;border-color:#2d5aa8;' : 'background:#fff;color:#334155;'}">
-        ⏳ 1. Pending Approvals (${pendingItems.length})
+    <div class="notification-tabs" style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">
+      <button class="action-button ${activeTab === 'temp_quarantine' ? 'active-tab' : ''}" data-notif-tab="temp_quarantine" style="${activeTab === 'temp_quarantine' ? 'background:#b91c1c;color:#fff;font-weight:700;border-color:#b91c1c;' : 'background:#fff;color:#334155;'}">
+        ⏱️ 1. Temp Quarantine (${tempQuarantineItems.length})
       </button>
-      <button class="action-button ${activeTab === 'approved' ? 'active-tab' : ''}" data-notif-tab="approved" style="${activeTab === 'approved' ? 'background:#166534;color:#fff;font-weight:700;border-color:#166534;' : 'background:#fff;color:#334155;'}">
-        ✅ 2. Approved Requests (${approvedItems.length})
+      <button class="action-button ${activeTab === 'pending' ? 'active-tab' : ''}" data-notif-tab="pending" style="${activeTab === 'pending' ? 'background:#d97706;color:#fff;font-weight:700;border-color:#d97706;' : 'background:#fff;color:#334155;'}">
+        ⏳ 2. Pending Approvals (${pendingItems.length})
+      </button>
+      <button class="action-button ${activeTab === 'allowed' ? 'active-tab' : ''}" data-notif-tab="allowed" style="${activeTab === 'allowed' ? 'background:#166534;color:#fff;font-weight:700;border-color:#166534;' : 'background:#fff;color:#334155;'}">
+        ✅ 3. Allowed Requests (${allowedItems.length})
       </button>
       <button class="action-button ${activeTab === 'disallowed' ? 'active-tab' : ''}" data-notif-tab="disallowed" style="${activeTab === 'disallowed' ? 'background:#475569;color:#fff;font-weight:700;border-color:#475569;' : 'background:#fff;color:#334155;'}">
-        🚫 3. Disallowed / History (${disallowedItems.length})
+        🚫 4. Disallowed Requests (${disallowedItems.length})
       </button>
       <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
         <button class="action-button secondary" data-notification-clear-tab="${activeTab}" style="background:#475569;color:#fff;font-weight:600;" title="Clear notifications in current tab">
-          🧹 Clear This Tab
+          🧹 Clear Current Tab
         </button>
         <button class="action-button secondary" data-notification-clear-all="true" style="background:#b91c1c;color:#fff;border-color:#991b1b;font-weight:600;" title="Clear all notifications across all categories">
           🗑️ Clear All
@@ -216,11 +274,11 @@ function renderNotifications() {
 
   notificationsLiveTimer = setInterval(() => {
     if (state.page !== 'notifications') { clearInterval(notificationsLiveTimer); notificationsLiveTimer = null; return; }
-    // Only re-render if on pending tab to update countdowns
-    if (state.notificationTab === 'pending' && pendingItems.length > 0) {
+    // Only re-render if on temp_quarantine or pending tab to update real-time countdowns
+    if (['temp_quarantine', 'pending'].includes(state.notificationTab) && (tempQuarantineItems.length > 0 || pendingItems.length > 0)) {
       renderAdmin();
     }
-  }, 3000);
+  }, 2000);
 
   return `${tabsHtml}<p class="page-intro">${activeIntro}</p>${activeContent}`;
 }
@@ -691,7 +749,8 @@ function showNotificationPopup(notification) {
   const denyBtn = $('#notificationDenyBtn');
   const closeXBtn = $('#notificationModalCloseXBtn');
   const closeBtn = $('#notificationModalCloseBtn');
-  const titleEl = $('.modal-card h3');
+  const titleText = $('#notificationModalTitleText') || $('.modal-card h3');
+  const netStatus = $('#notificationModalInternetStatus');
 
   const closeModal = () => {
     if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
@@ -712,8 +771,9 @@ function showNotificationPopup(notification) {
   }
 
   if (overconsumption) {
-    if (titleEl) titleEl.textContent = 'Data Usage Alert';
+    if (titleText) titleText.textContent = 'Data Usage Alert';
     if (badge) badge.classList.add('hidden');
+    if (netStatus) netStatus.classList.add('hidden');
     if (timerBox) timerBox.classList.add('hidden');
     if (waitBtn) waitBtn.classList.add('hidden');
     $('#notificationModalText').textContent = notification.message;
@@ -728,22 +788,40 @@ function showNotificationPopup(notification) {
     denyBtn.onclick = () => respondToNotification(notification.id, 'disconnect');
   } else {
     const isReturning = (notification.message || '').includes('Returning user');
-    if (titleEl) titleEl.textContent = isReturning ? '🛡️ Returning User Detected (Quarantined)' : '🛡️ New Connection Request (Quarantined)';
+    if (titleText) titleText.textContent = isReturning ? '🛡️ Returning Client — 45s Temp Quarantine' : '🛡️ New Connection Request — 45s Temp Quarantine';
     if (badge) {
       badge.classList.remove('hidden');
-      badge.className = `status-badge ${notification.status}`;
-      badge.textContent = notification.status === 'quarantine_wait' ? 'Quarantine (Wait)' : (isReturning ? 'Returning (Quarantine)' : 'Quarantine');
+      badge.className = 'status-badge quarantine';
+      badge.textContent = 'State: 45s Temp Quarantine';
     }
+    if (netStatus) netStatus.classList.remove('hidden');
     if (timerBox) timerBox.classList.remove('hidden');
     if (waitBtn) {
       waitBtn.classList.remove('hidden');
+      waitBtn.textContent = '⏳ Move to Pending (Internet OFF)';
+      waitBtn.style.background = '#d97706';
+      waitBtn.style.color = '#fff';
+      waitBtn.style.fontWeight = '600';
+      waitBtn.title = 'Move request to Pending Approvals queue (Keep Internet OFF)';
       waitBtn.onclick = () => respondToNotification(notification.id, 'wait');
     }
     $('#notificationModalText').textContent = notification.message;
     denyBtn.disabled = false;
-    denyBtn.textContent = 'Disallow / Block';
+    denyBtn.textContent = '🚫 Disallow (Block)';
     denyBtn.style.background = '#b91c1c';
+    denyBtn.style.color = '#fff';
+    denyBtn.style.fontWeight = '600';
+    denyBtn.title = 'Disallow client and block internet access';
     denyBtn.onclick = () => respondToNotification(notification.id, 'deny');
+
+    allowBtn.disabled = false;
+    allowBtn.style.opacity = '1';
+    allowBtn.style.cursor = 'pointer';
+    allowBtn.textContent = '✅ Allow Access (Internet ON)';
+    allowBtn.style.background = '#166534';
+    allowBtn.style.color = '#ffffff';
+    allowBtn.style.fontWeight = '700';
+    allowBtn.title = 'Approve connection and grant Internet access immediately';
     allowBtn.onclick = () => {
       if (allowBtn.disabled) return;
       respondToNotification(notification.id, 'allow');
@@ -761,12 +839,12 @@ function showNotificationPopup(notification) {
 
       if (timeoutRemaining === 0) {
         if (timeoutEl) {
-          timeoutEl.textContent = '0m 00s — Expired (Auto-Disallowed & Disconnected)';
+          timeoutEl.textContent = '0m 00s — Expired (Auto-Disallowed & Blocked)';
           timeoutEl.style.color = '#b91c1c';
         }
         if (badge) {
           badge.className = 'status-badge blocked';
-          badge.textContent = 'Disallowed (5m Timeout)';
+          badge.textContent = 'State: Disallowed (5m Timeout)';
         }
         if (allowBtn) {
           allowBtn.disabled = true;
@@ -779,7 +857,7 @@ function showNotificationPopup(notification) {
         denyBtn.textContent = 'Close';
         denyBtn.onclick = closeModal;
       } else if (reviewRemaining === 0) {
-        // 45s popup review window finished without response -> Move to Pending Approvals tab!
+        // 45s popup review window finished without response -> Move to State b: Pending Approvals tab!
         if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
         modal.classList.add('hidden');
         if (state.page === 'notifications') {
@@ -787,27 +865,16 @@ function showNotificationPopup(notification) {
           renderAdmin();
         }
       } else {
-        // Allow button is active and visible to owner
-        if (allowBtn) {
-          allowBtn.disabled = false;
-          allowBtn.style.opacity = '1';
-          allowBtn.style.cursor = 'pointer';
-          allowBtn.textContent = 'Allow Access';
-          allowBtn.style.background = '#166534';
-          allowBtn.style.color = '#ffffff';
-          allowBtn.title = 'Approve connection and grant internet access immediately';
-        }
-
         if (holdEl) {
-          holdEl.textContent = `${reviewRemaining}s left (closes to Pending Approvals tab)`;
+          holdEl.textContent = `${reviewRemaining}s left (moves to Pending at 0s)`;
           holdEl.style.color = '#0284c7';
         }
 
         if (timeoutEl) {
           const mins = Math.floor(timeoutRemaining / 60);
           const secs = String(timeoutRemaining % 60).padStart(2, '0');
-          timeoutEl.textContent = `${mins}m ${secs}s`;
-          timeoutEl.style.color = timeoutRemaining < 60 ? '#b91c1c' : '#334155';
+          timeoutEl.textContent = `${mins}m ${secs}s (auto-disallows at 0s)`;
+          timeoutEl.style.color = timeoutRemaining < 60 ? '#b91c1c' : '#92400e';
         }
       }
     }

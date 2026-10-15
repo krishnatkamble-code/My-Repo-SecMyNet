@@ -174,7 +174,7 @@ apply_quarantine() {
 
   if [ -n "$ip" ]; then
     ip rule del from "$ip" table 99 2>/dev/null || true
-    ip rule add from "$ip" table 99 priority 100 2>/dev/null || true
+    ip rule add from "$ip" table 99 priority 1 2>/dev/null || true
   fi
 
   # IPv6 policy routing blackhole
@@ -182,7 +182,7 @@ apply_quarantine() {
   ip -6 route add blackhole default table 99 2>/dev/null || true
   for ip6 in $(ip -6 neigh show 2>/dev/null | grep -i "$mac" | awk '{print $1}'); do
     [ -n "$ip6" ] && ip -6 rule del from "$ip6" table 99 2>/dev/null || true
-    [ -n "$ip6" ] && ip -6 rule add from "$ip6" table 99 priority 100 2>/dev/null || true
+    [ -n "$ip6" ] && ip -6 rule add from "$ip6" table 99 priority 1 2>/dev/null || true
   done
 
   # 2. OpenWrt Native fw4 injection (if fw4 exists)
@@ -479,7 +479,9 @@ enforce_active_quarantines() {
       sta_mac="$(printf '%s' "$sta" | tr '[:upper:]' '[:lower:]')"
       [ -z "$sta_mac" ] && continue
       if ! grep -qi "$sta_mac" /etc/secmynet-agent/allowed_macs 2>/dev/null; then
-        apply_quarantine "$sta_mac" ""
+        sta_ip=$(grep -i "$sta_mac" /tmp/dhcp.leases 2>/dev/null | cut -d' ' -f3 | head -n1)
+        [ -z "$sta_ip" ] && sta_ip=$(ip -4 neigh show 2>/dev/null | grep -i "$sta_mac" | awk '{print $1}' | head -n1)
+        apply_quarantine "$sta_mac" "$sta_ip"
       fi
     done
   done
@@ -524,9 +526,13 @@ fi
 if [ "$1" = "--event" ]; then
   # Instant trigger from OpenWrt hotplug (e.g., DHCP lease or hostapd association)
   log "Hotplug event received: $2 $3 $4"
+  if [ -n "$3" ] && ! grep -qi "$3" /etc/secmynet-agent/allowed_macs 2>/dev/null; then
+    apply_quarantine "$3" "$4"
+  fi
   post_telemetry
   poll_commands
   exit $?
 fi
 
 main
+

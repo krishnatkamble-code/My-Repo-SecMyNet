@@ -53,9 +53,12 @@ if command -v uci >/dev/null 2>&1 && [ -f /etc/config/uhttpd ]; then
   fi
 fi
 
-# 5. Initialize firewall rules
+# 5. Initialize firewall rules and wipe stale allowed states
+rm -f /etc/secmynet-agent/allowed_macs 2>/dev/null || true
+touch /etc/secmynet-agent/allowed_macs
 /bin/sh /etc/secmynet-agent/agent.sh --init
-echo "✔ Initialized SecMyNet zero-trust firewall quarantine table"
+/etc/init.d/firewall restart 2>/dev/null || true
+echo "✔ Initialized SecMyNet zero-trust firewall quarantine table and reloaded firewall"
 
 # 6. Configure init.d service
 cat << 'EOF' > /etc/init.d/secmynet-agent
