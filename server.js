@@ -672,15 +672,8 @@ async function reconcileQuarantines() {
     const now = new Date();
     const nowIso = now.toISOString();
 
-    // 1. Release devices that were approved by owner but were waiting for mandatory 45s hold
-    const holdingRows = await all(
-      "SELECT * FROM notifications WHERE status = 'approved_holding' AND min_quarantine_until IS NOT NULL AND min_quarantine_until <= $1",
-      [nowIso]
-    );
-    for (const n of holdingRows || []) {
-      console.log(`Mandatory 45s quarantine hold completed for notification ${n.id}. Releasing client.`);
-      await releaseQuarantinedDevice(n.id);
-    }
+    // Quarantine auto-disconnect: clients that exceeded 5 minutes (300s) in quarantine without approval are disconnected
+    // NOTE: Clients are NEVER auto-released. Internet access is unlocked strictly when owner explicitly clicks Allow.
 
     // 2. Auto-disconnect clients that exceeded 5 minutes (300s) in quarantine without approval
     const expiredRows = await all(
@@ -1520,12 +1513,34 @@ app.post('/api/openwrt/routers/:routerId/commands/:commandId/complete', routerAg
   res.json({ ok: true });
 });
 
+app.delete('/api/notifications/:notificationId', authRequired, adminRequired, async (req, res) => {
+  await ensureDb();
+  await run('DELETE FROM notifications WHERE id = $1', [req.params.notificationId]);
+  res.json({ ok: true, message: 'Notification cleared.' });
+});
+
 app.post('/api/notifications/:notificationId/respond', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
   const { allow, action } = req.body;
   const notification = await get('SELECT * FROM notifications WHERE id = $1', [req.params.notificationId]);
-  if (!notification || !['unread', 'quarantine', 'quarantine_wait', 'approved_holding'].includes(notification.status)) {
-    return res.status(404).json({ message: 'Pending connection request not found.' });
+  if (!notification) {
+    return res.status(404).json({ message: 'Notification not found.' });
+  }
+
+  // Allow disconnect on already approved devices (from Approved tab)
+  if (notification.status === 'allowed' && (action === 'disconnect' || action === 'deny')) {
+    await denyAndDisconnectDevice(notification.id, 'disconnected');
+    return res.json({ message: 'Device disconnected and access revoked.', status: 'disconnected' });
+  }
+
+  // Allow re-approval on previously disallowed/disconnected notifications
+  if (['denied', 'disconnected', 'quarantine_auto_denied'].includes(notification.status) && (allow || action === 'allow')) {
+    await releaseQuarantinedDevice(notification.id);
+    return res.json({ message: 'Device re-approved and connected. Quarantine released.', status: 'allowed' });
+  }
+
+  if (!['unread', 'quarantine', 'quarantine_wait', 'approved_holding'].includes(notification.status)) {
+    return res.status(400).json({ message: 'Connection request is no longer pending.' });
   }
 
   if (notification.type === 'connection_request') {

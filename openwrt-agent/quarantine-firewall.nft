@@ -1,7 +1,7 @@
 # /etc/nftables.d/secmynet-quarantine.nft
 # SecMyNet Zero-Trust Quarantine-First Firewall Rules for OpenWrt (nftables)
 #
-# Blocks Internet (WAN) forwarding for all quarantined clients.
+# Blocks Internet (WAN) forwarding for all quarantined clients (both IPv4 and IPv6).
 # Preserves local DNS/DHCP communication with the router.
 # Redirects HTTP port 80 to port 8080 (SecMyNet Holding Captive Portal).
 
@@ -15,7 +15,13 @@ table inet secmynet {
     set quarantined_ips {
         type ipv4_addr
         flags interval
-        comment "SecMyNet quarantined client IPs pending owner approval"
+        comment "SecMyNet quarantined client IPv4s pending owner approval"
+    }
+
+    set quarantined_ip6s {
+        type ipv6_addr
+        flags interval
+        comment "SecMyNet quarantined client IPv6s pending owner approval"
     }
 
     chain prerouting {
@@ -33,9 +39,12 @@ table inet secmynet {
         ether saddr @quarantined_macs tcp dport 53 accept
         ip saddr @quarantined_ips udp dport 53 accept
         ip saddr @quarantined_ips tcp dport 53 accept
+        ip6 saddr @quarantined_ip6s udp dport 53 accept
+        ip6 saddr @quarantined_ip6s tcp dport 53 accept
 
-        # Strictly DROP all other forwarding to Internet (WAN)
+        # Strictly DROP all other forwarding to Internet (WAN) for IPv4 and IPv6
         ether saddr @quarantined_macs counter drop
         ip saddr @quarantined_ips counter drop
+        ip6 saddr @quarantined_ip6s counter drop
     }
 }

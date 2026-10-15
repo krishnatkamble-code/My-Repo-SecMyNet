@@ -181,6 +181,34 @@ test('Quarantine-first lifecycle and timing test', async (t) => {
   const blkCmd = finalCmds.find((c) => c.command_type === 'block' && c.payload.mac === denyMac);
   assert.ok(discCmd, 'Router should receive disconnect command');
   assert.ok(blkCmd, 'Router should receive block command');
+
+  // 9. Test disconnect on an approved notification (Approved tab Disconnect action)
+  const disconnRes = await fetch(`${baseUrl}/api/notifications/${qNotif.id}/respond`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${adminToken}`
+    },
+    body: JSON.stringify({ action: 'disconnect' })
+  });
+  assert.equal(disconnRes.status, 200);
+  const disconnBody = await disconnRes.json();
+  assert.equal(disconnBody.status, 'disconnected');
+
+  // 10. Test clearing a notification (DELETE /api/notifications/:id)
+  const clearRes = await fetch(`${baseUrl}/api/notifications/${qNotif.id}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  assert.equal(clearRes.status, 200);
+  const clearBody = await clearRes.json();
+  assert.ok(clearBody.ok);
+
+  const afterClearRes = await fetch(`${baseUrl}/api/notifications`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  const { notifications: afterClearNotifs } = await afterClearRes.json();
+  assert.ok(!afterClearNotifs.some((n) => n.id === qNotif.id), 'Cleared notification should no longer appear');
 });
 
 test('Returning user re-quarantine and connection history retention', async (t) => {

@@ -412,16 +412,16 @@
           return;
         }
 
-        // Explicit Deny
-        if (data.status === 'denied') {
+        // Disallowed / Denied
+        if (['denied', 'quarantine_auto_denied', 'disconnected'].includes(data.status)) {
           card.className = 'card denied';
           statusIcon.textContent = '🚫';
-          statusTitle.textContent = 'Connection Denied';
-          statusDesc.textContent = 'The owner of the router denied your connection request.';
+          statusTitle.textContent = 'Connection Disallowed';
+          statusDesc.textContent = data.message || 'Connection request has been disallowed by the router owner.';
           badgeStatus.className = 'badge badge-danger';
-          badgeStatus.textContent = 'Denied by Owner';
+          badgeStatus.textContent = 'Disallowed by Owner';
           holdBox.style.display = 'none';
-          liveStatusText.textContent = 'Access Denied';
+          liveStatusText.textContent = 'Connection Disallowed';
           dotLive.style.background = '#ef4444';
           clearInterval(checkTimer);
           return;
@@ -433,7 +433,7 @@
           card.className = 'card approved';
           statusIcon.textContent = '✅';
           statusTitle.textContent = 'Access Approved by Owner!';
-          statusDesc.textContent = 'Your device has been approved. WAN internet access is now unlocked!';
+          statusDesc.textContent = 'Access Approved by Owner! You are now connected to the Internet.';
           badgeStatus.className = 'badge badge-success';
           badgeStatus.textContent = 'Connected & Allowed';
           holdBox.style.display = 'none';
@@ -446,28 +446,18 @@
           return;
         }
 
-        // Mandatory Evaluation Hold
+        // Approval Pending
+        holdBox.style.display = 'block';
         if (data.holdRemainingSeconds > 0) {
-          holdBox.style.display = 'block';
-          holdCountdown.textContent = `${data.holdRemainingSeconds}s evaluation hold in progress`;
-          statusTitle.textContent = 'Service Approval Pending';
-          statusDesc.textContent = 'Service Approval pending from owner of the Router. Security policy holds your device for at least 45 seconds.';
-          badgeStatus.className = 'badge badge-warning';
+          holdCountdown.textContent = `${data.holdRemainingSeconds}s initial hold in progress`;
           badgeStatus.textContent = `Holding (${data.holdRemainingSeconds}s)`;
-        } else if (data.status === 'approved_holding') {
-          holdBox.style.display = 'block';
-          holdCountdown.textContent = 'Releasing WAN internet traffic...';
-          statusTitle.textContent = 'Owner Approved — Releasing Hold';
-          badgeStatus.className = 'badge badge-success';
-          badgeStatus.textContent = 'Unlocking WAN';
         } else {
-          holdBox.style.display = 'block';
-          holdCountdown.textContent = 'Passed (Awaiting Owner Click)';
-          statusTitle.textContent = 'Service Approval Pending';
-          statusDesc.textContent = 'Service Approval pending from owner of the Router. Evaluation hold completed. Awaiting owner approval.';
-          badgeStatus.className = 'badge badge-warning';
-          badgeStatus.textContent = 'Waiting for Owner';
+          holdCountdown.textContent = 'Awaiting Owner Approval';
+          badgeStatus.textContent = 'Pending Approval';
         }
+        statusTitle.textContent = 'Service Approval Pending';
+        statusDesc.textContent = 'Service Approval pending from owner of the Router. Internet access is held until approved by the owner.';
+        badgeStatus.className = 'badge badge-warning';
 
         if (data.timeoutRemainingSeconds > 0) {
           const m = Math.floor(data.timeoutRemainingSeconds / 60);

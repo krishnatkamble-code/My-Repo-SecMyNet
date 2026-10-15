@@ -136,55 +136,85 @@ function renderManage() { const rows = state.data.locations.map((location) => { 
 let notificationsLiveTimer = null;
 function renderNotifications() {
   if (notificationsLiveTimer) { clearInterval(notificationsLiveTimer); notificationsLiveTimer = null; }
+  state.notificationTab = state.notificationTab || 'pending';
   const now = Date.now();
-  const rows = state.notifications.map((n) => {
-    const isConn = n.type === 'connection_request';
-    const isPending = ['unread', 'quarantine', 'quarantine_wait', 'approved_holding'].includes(n.status);
+
+  const allItems = state.notifications || [];
+  const pendingItems = allItems.filter((n) => n.type === 'connection_request' && ['unread', 'quarantine', 'quarantine_wait', 'approved_holding'].includes(n.status));
+  const approvedItems = allItems.filter((n) => n.status === 'allowed');
+  const disallowedItems = allItems.filter((n) => ['denied', 'quarantine_auto_denied', 'disconnected'].includes(n.status) || (n.type === 'overconsumption' && n.status !== 'allowed'));
+
+  const pendingRows = pendingItems.map((n) => {
     const isReturning = (n.message || '').includes('Returning user');
-    const minHold = n.min_quarantine_until ? new Date(n.min_quarantine_until).getTime() : 0;
     const expires = n.expires_at ? new Date(n.expires_at).getTime() : (now + 300000);
-    const holdRemaining = Math.max(0, Math.ceil((minHold - now) / 1000));
     const timeoutRemaining = Math.max(0, Math.ceil((expires - now) / 1000));
+    const ageSec = Math.floor((now - new Date(n.created_at).getTime()) / 1000);
+    const mins = Math.floor(timeoutRemaining / 60);
+    const secs = String(timeoutRemaining % 60).padStart(2, '0');
+
     let actions = '';
-    if (isPending && isConn) {
-      if (timeoutRemaining === 0) {
-        actions = `<span class="status-badge blocked">Disallowed (5m Timeout)</span>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;margin-left:6px;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
-      } else {
-        const holdTag = holdRemaining > 0 ? `<span class="status-badge" style="background:#fef3c7;color:#92400e;font-size:0.75rem;margin-right:6px;" data-quarantine-hold="${minHold}">Hold ${holdRemaining}s</span>` : '';
-        actions = `${holdTag}<button class="action-button" style="background:#166534;color:#fff;" data-notification-response="${n.id}|allow">Allow Access</button><button class="action-button" style="background:#f59e0b;color:#fff;" data-notification-response="${n.id}|wait">Wait (5m)</button><button class="action-button danger" data-notification-response="${n.id}|deny">Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
-      }
-    } else if (n.status === 'unread' && n.type === 'overconsumption') {
-      actions = `<button class="action-button" data-notification-response="${n.id}|continue">Allow Further</button><button class="action-button danger" data-notification-response="${n.id}|disconnect">Disconnect</button>`;
+    if (timeoutRemaining === 0) {
+      actions = `<span class="status-badge blocked">Disallowed (5m Timeout)</span>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;margin-left:6px;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
     } else {
-      const badgeCls = n.status === 'allowed' ? 'allowed' : ['denied', 'disconnected', 'quarantine_auto_denied'].includes(n.status) ? 'blocked' : ['quarantine', 'quarantine_wait', 'approved_holding'].includes(n.status) ? n.status : '';
-      const displayStatus = n.status === 'quarantine_auto_denied' ? 'Disallowed (5m Timeout)' : n.status.replace(/_/g, ' ');
-      actions = `<span class="status-badge ${badgeCls}">${escapeHtml(displayStatus)}</span>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;margin-left:6px;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+      const waitLabel = ageSec >= 45 ? `Pending (${Math.floor(ageSec / 60)}m ${ageSec % 60}s)` : `Review (${45 - ageSec}s)`;
+      actions = `<span class="status-badge" style="background:#fef3c7;color:#92400e;font-size:0.75rem;margin-right:6px;">${waitLabel}</span><button class="action-button" style="background:#166534;color:#fff;font-weight:600;" data-notification-response="${n.id}|allow">Allow Access</button><button class="action-button" style="background:#f59e0b;color:#fff;" data-notification-response="${n.id}|wait">Wait (5m)</button><button class="action-button danger" data-notification-response="${n.id}|deny">Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
     }
     const typeBadge = isReturning ? '<span class="status-badge" style="background:#e0f2fe;color:#0369a1;font-size:0.72rem;margin-left:6px;">Returning Client</span>' : '';
-    return `<tr><td>${escapeHtml(isConn ? 'Connection request' : 'Data overconsumption')}${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+    return `<tr><td>Connection request${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong><small style="color:#b45309;">⏳ Auto-disconnects in ${mins}m ${secs}s if unapproved</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
   }).join('');
+
+  const approvedRows = approvedItems.map((n) => {
+    const isReturning = (n.message || '').includes('Returning user');
+    const typeBadge = isReturning ? '<span class="status-badge" style="background:#e0f2fe;color:#0369a1;font-size:0.72rem;margin-left:6px;">Returning Client</span>' : '';
+    const actions = `<button class="action-button danger" data-notification-response="${n.id}|disconnect">Disconnect</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">View History</button>` : ''}<button class="action-button secondary" data-notification-clear="${n.id}">Clear</button>`;
+    return `<tr><td>Approved access${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong><span class="status-badge allowed" style="margin-left:6px;">Allowed / Online</span></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+  }).join('');
+
+  const disallowedRows = disallowedItems.map((n) => {
+    const badgeCls = ['denied', 'disconnected', 'quarantine_auto_denied'].includes(n.status) ? 'blocked' : '';
+    const displayStatus = n.status === 'quarantine_auto_denied' ? 'Disallowed (5m Timeout)' : n.status.replace(/_/g, ' ');
+    const actions = `<button class="action-button" style="background:#166534;color:#fff;" data-notification-response="${n.id}|allow">Re-Allow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">View History</button>` : ''}<button class="action-button secondary" data-notification-clear="${n.id}">Clear</button>`;
+    return `<tr><td>Disallowed / Closed</td><td><strong>${escapeHtml(n.message)}</strong><span class="status-badge ${badgeCls}" style="margin-left:6px;">${escapeHtml(displayStatus)}</span></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+  }).join('');
+
+  const activeTab = state.notificationTab;
+  let activeContent = '';
+  let activeIntro = '';
+
+  if (activeTab === 'pending') {
+    activeIntro = 'Category 1: Pending Approvals — Connection requests exceeding 45s review window or awaiting owner decision. Client has ZERO internet access until approved.';
+    activeContent = pendingItems.length ? table(['Type', 'Notification', 'Location', 'Requested Time', 'Actions'], pendingRows) : '<p class="empty">No pending connection requests. All clients have been reviewed.</p>';
+  } else if (activeTab === 'approved') {
+    activeIntro = 'Category 2: Approved Requests — Client devices approved by the owner with internet access granted.';
+    activeContent = approvedItems.length ? table(['Type', 'Notification', 'Location', 'Approved Time', 'Actions'], approvedRows) : '<p class="empty">No approved connection records.</p>';
+  } else {
+    activeIntro = 'Category 3: Disallowed / History — Devices that were disallowed, disconnected, or timed out.';
+    activeContent = disallowedItems.length ? table(['Type', 'Notification', 'Location', 'Time', 'Actions'], disallowedRows) : '<p class="empty">No disallowed or disconnected records.</p>';
+  }
+
+  const tabsHtml = `
+    <div class="notification-tabs" style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+      <button class="action-button ${activeTab === 'pending' ? 'active-tab' : ''}" data-notif-tab="pending" style="${activeTab === 'pending' ? 'background:#2d5aa8;color:#fff;font-weight:700;border-color:#2d5aa8;' : 'background:#fff;color:#334155;'}">
+        ⏳ 1. Pending Approvals (${pendingItems.length})
+      </button>
+      <button class="action-button ${activeTab === 'approved' ? 'active-tab' : ''}" data-notif-tab="approved" style="${activeTab === 'approved' ? 'background:#166534;color:#fff;font-weight:700;border-color:#166534;' : 'background:#fff;color:#334155;'}">
+        ✅ 2. Approved Requests (${approvedItems.length})
+      </button>
+      <button class="action-button ${activeTab === 'disallowed' ? 'active-tab' : ''}" data-notif-tab="disallowed" style="${activeTab === 'disallowed' ? 'background:#475569;color:#fff;font-weight:700;border-color:#475569;' : 'background:#fff;color:#334155;'}">
+        🚫 3. Disallowed / History (${disallowedItems.length})
+      </button>
+    </div>
+  `;
 
   notificationsLiveTimer = setInterval(() => {
     if (state.page !== 'notifications') { clearInterval(notificationsLiveTimer); notificationsLiveTimer = null; return; }
-    const curr = Date.now();
-    let needsReRender = false;
-    document.querySelectorAll('[data-quarantine-hold]').forEach((el) => {
-      const target = Number(el.dataset.quarantineHold);
-      const rem = Math.max(0, Math.ceil((target - curr) / 1000));
-      if (rem > 0) {
-        el.textContent = `Hold ${rem}s`;
-      } else {
-        el.style.display = 'none';
-      }
-    });
-    if (needsReRender) {
-      clearInterval(notificationsLiveTimer);
-      notificationsLiveTimer = null;
+    // Only re-render if on pending tab to update countdowns
+    if (state.notificationTab === 'pending' && pendingItems.length > 0) {
       renderAdmin();
     }
-  }, 1000);
+  }, 3000);
 
-  return `<p class="page-intro">Connection approvals with mandatory 45s quarantine verification, identity hold up to 5 min, and auto-disconnection.</p>${table(['Type', 'Notification', 'Location', 'Time', 'Action'], rows)}`;
+  return `${tabsHtml}<p class="page-intro">${activeIntro}</p>${activeContent}`;
 }
 function renderSuperAdmin() { const adminRows = state.superAdmins.map((admin) => `<tr><td>${escapeHtml(admin.name)}<small>${escapeHtml(admin.email)}</small></td><td>${admin.accessStatus === 'disabled' ? '<span class="status-badge blocked">Blocked</span>' : '<span class="status-badge allowed">Enabled</span>'}</td><td>${admin.locations.map((location) => `${escapeHtml(location.name)} (${location.devicesCount} devices)`).join('<br>') || 'None'}</td><td>${admin.devices.map((device) => escapeHtml(device.name)).join('<br>') || 'None'}</td><td><button class="action-button" data-super-edit="${escapeHtml(admin.id)}">Edit admin</button><button class="action-button" data-super-reset="${escapeHtml(admin.id)}">Send reset link</button><button class="action-button" data-super-toggle="${escapeHtml(admin.id)}">${admin.accessStatus === 'disabled' ? 'Unblock' : 'Block portal access'}</button><button class="action-button danger-action" data-super-delete="${escapeHtml(admin.id)}">Delete Admin</button></td></tr>`).join(''); return `<section class="content-card"><h3>Create admin</h3><form id="superAdminForm"><input name="name" placeholder="Admin name" required><input name="email" type="email" placeholder="Admin email" required><input name="password" type="password" placeholder="Temporary password" maxlength="32" required><button>Create admin</button></form></section><section class="content-card"><h3>Administrators and resources</h3>${table(['Admin', 'Portal access', 'Locations', 'Devices', 'Actions'], adminRows)}</section>`; }
 function renderRouters() {
@@ -603,7 +633,29 @@ function navigate(page) { state.page = page; state.selected = null; state.showLo
 function renderUserDashboard(data) { state.userData = data; $('#authSection').classList.add('hidden'); $('#dashboard').classList.add('hidden'); $('#userDashboard').classList.remove('hidden'); state.userPage = location.hash.replace('#my-', '') || 'locations'; if (!['locations', 'devices', 'usage', 'account'].includes(state.userPage)) state.userPage = 'locations'; renderUserPage(); }
 function renderUserPage() { const d = state.userData; const meta = { locations: ['My Locations', 'Locations where you have WiFi access.'], devices: ['My Devices', 'WiFi devices you are authorised to use.'], usage: ['My Usage', 'Your current and historical data consumption.'], account: ['My Account', 'Your SecMyNet account and access summary.'] }[state.userPage]; $('#userPageTitle').textContent = meta[0]; $('#userPageDescription').textContent = meta[1]; document.querySelectorAll('[data-user-page]').forEach((a) => a.classList.toggle('active', a.dataset.userPage === state.userPage)); const uniqueLocations = [...new Map(d.devices.map((device) => [device.location?.id || device.location_id, device.location])).values()].filter(Boolean); let content = ''; if (state.userPage === 'locations') content = `<div class="stats">${stat('Accessible locations', uniqueLocations.length)}${stat('Allowed devices', d.stats.totalDevices)}${stat('Connected now', d.stats.activeConnections)}</div><div class="location-grid">${uniqueLocations.map((l) => { const devices = d.devices.filter((device) => (device.location?.id || device.location_id) === l.id); return `<article class="location-card"><span class="card-kicker">${escapeHtml(l.city)}</span><h3>${escapeHtml(l.name)}</h3><div><strong>${devices.length}</strong> available WiFi devices</div><small>${devices.map((x) => escapeHtml(x.name)).join(', ')}</small></article>`; }).join('') || '<p class="empty">You do not have access to any locations yet.</p>'}</div>`; if (state.userPage === 'devices') content = table(['Device', 'Router ID', 'Location', 'WiFi', 'Access status'], d.devices.map((device) => `<tr><td>${escapeHtml(device.name)}</td><td><code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(device.router_id || device.routerId || 'N/A')}</code></td><td>${escapeHtml(device.location?.name || 'Unknown')}</td><td>${escapeHtml(device.wifi_name || device.wifiName)}</td><td><span class="status-badge allowed">Allowed</span></td></tr>`).join('')); if (state.userPage === 'usage') content = `<div class="stats">${stat('Data since start', mb(usage(d.connections)))}${stat('This month', mb(usage(d.connections, 'month')))}${stat('This week', mb(usage(d.connections, 'week')))}${stat('Today', mb(usage(d.connections, 'day')))}</div>${table(['Device', 'Location', 'Status', 'Data used'], d.connections.map((c) => `<tr><td>${escapeHtml(c.deviceName)}</td><td>${escapeHtml(c.locationName)}</td><td><span class="status-badge ${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></td><td>${mb(c.dataUsedMb)}</td></tr>`).join(''))}`; if (state.userPage === 'account') content = `<div class="stats">${stat('Allowed devices', d.stats.totalDevices)}${stat('Total connections', d.stats.totalConnections)}${stat('Active connections', d.stats.activeConnections)}</div><section class="content-card"><h3>${escapeHtml(d.user.name)}</h3><p>${escapeHtml(d.user.email)}</p><p>Your access is managed by your SecMyNet administrator.</p></section>`; $('#userPageContent').innerHTML = content; }
 let modalCountdownTimer = null;
-async function loadNotifications(showPopup = true) { if (!state.token || !state.data) return; try { const response = await apiRequest('/api/notifications', { headers: authHeaders() }); state.notifications = response.notifications || []; const pending = state.notifications.filter((n) => ['unread', 'quarantine', 'quarantine_wait', 'approved_holding'].includes(n.status)); $('#notificationCount').textContent = pending.length; if (state.page === 'notifications') renderAdmin(); const request = pending.find((n) => n.type === 'connection_request' && ['quarantine', 'quarantine_wait', 'approved_holding', 'unread'].includes(n.status)); if (showPopup && request) showNotificationPopup(request); } catch (_) { } }
+async function loadNotifications(showPopup = true) {
+  if (!state.token || !state.data) return;
+  try {
+    const response = await apiRequest('/api/notifications', { headers: authHeaders() });
+    state.notifications = response.notifications || [];
+    const pending = state.notifications.filter((n) => ['unread', 'quarantine', 'quarantine_wait', 'approved_holding'].includes(n.status));
+    $('#notificationCount').textContent = pending.length;
+    if (state.page === 'notifications') renderAdmin();
+
+    // Show popup ONLY for fresh requests within their 45-second review window
+    const now = Date.now();
+    const freshRequest = pending.find((n) => {
+      if (n.type !== 'connection_request') return false;
+      const age = now - new Date(n.created_at).getTime();
+      return age < 45000;
+    });
+
+    if (showPopup && freshRequest) {
+      showNotificationPopup(freshRequest);
+    }
+  } catch (_) { }
+}
+
 function showNotificationPopup(notification) {
   if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
   const modal = $('#notificationModal');
@@ -614,7 +666,18 @@ function showNotificationPopup(notification) {
   const histBtn = $('#notificationHistoryBtn');
   const allowBtn = $('#notificationAllowBtn');
   const denyBtn = $('#notificationDenyBtn');
+  const closeXBtn = $('#notificationModalCloseXBtn');
+  const closeBtn = $('#notificationModalCloseBtn');
   const titleEl = $('.modal-card h3');
+
+  const closeModal = () => {
+    if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
+    modal.classList.add('hidden');
+    if (state.page === 'notifications') renderAdmin();
+  };
+
+  if (closeXBtn) closeXBtn.onclick = closeModal;
+  if (closeBtn) closeBtn.onclick = closeModal;
 
   if (histBtn) {
     if (notification.user_id) {
@@ -646,7 +709,7 @@ function showNotificationPopup(notification) {
     if (badge) {
       badge.classList.remove('hidden');
       badge.className = `status-badge ${notification.status}`;
-      badge.textContent = notification.status === 'quarantine_wait' ? 'Quarantine (Wait)' : notification.status === 'approved_holding' ? 'Holding (45s)' : (isReturning ? 'Returning (Quarantine)' : 'Quarantine');
+      badge.textContent = notification.status === 'quarantine_wait' ? 'Quarantine (Wait)' : (isReturning ? 'Returning (Quarantine)' : 'Quarantine');
     }
     if (timerBox) timerBox.classList.remove('hidden');
     if (waitBtn) {
@@ -665,9 +728,10 @@ function showNotificationPopup(notification) {
 
     function updateTimers() {
       const now = Date.now();
-      const minHold = notification.min_quarantine_until ? new Date(notification.min_quarantine_until).getTime() : 0;
-      const expires = notification.expires_at ? new Date(notification.expires_at).getTime() : (now + 300000);
-      const holdRemaining = Math.max(0, Math.ceil((minHold - now) / 1000));
+      const createdTime = new Date(notification.created_at).getTime();
+      const expires = notification.expires_at ? new Date(notification.expires_at).getTime() : (createdTime + 300000);
+      const elapsedSec = Math.floor((now - createdTime) / 1000);
+      const reviewRemaining = Math.max(0, 45 - elapsedSec);
       const timeoutRemaining = Math.max(0, Math.ceil((expires - now) / 1000));
       const holdEl = $('#notificationHoldCountdown');
       const timeoutEl = $('#notificationTimeoutCountdown');
@@ -690,12 +754,17 @@ function showNotificationPopup(notification) {
         }
         if (waitBtn) waitBtn.classList.add('hidden');
         denyBtn.textContent = 'Close';
-        denyBtn.onclick = () => {
-          modal.classList.add('hidden');
-          loadDashboard();
-        };
+        denyBtn.onclick = closeModal;
+      } else if (reviewRemaining === 0) {
+        // 45s popup review window finished without response -> Move to Pending Approvals tab!
+        if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
+        modal.classList.add('hidden');
+        if (state.page === 'notifications') {
+          state.notificationTab = 'pending';
+          renderAdmin();
+        }
       } else {
-        // Allow button is visible and active to owner from start till end (up to 5 minutes)
+        // Allow button is active and visible to owner
         if (allowBtn) {
           allowBtn.disabled = false;
           allowBtn.style.opacity = '1';
@@ -703,19 +772,12 @@ function showNotificationPopup(notification) {
           allowBtn.textContent = 'Allow Access';
           allowBtn.style.background = '#166534';
           allowBtn.style.color = '#ffffff';
-          allowBtn.title = 'Approve connection and grant internet access';
+          allowBtn.title = 'Approve connection and grant internet access immediately';
         }
 
-        if (holdRemaining > 0) {
-          if (holdEl) {
-            holdEl.textContent = `${holdRemaining}s evaluation hold (Click Allow to approve now)`;
-            holdEl.style.color = '#0284c7';
-          }
-        } else {
-          if (holdEl) {
-            holdEl.textContent = 'Evaluation hold complete (Ready to approve)';
-            holdEl.style.color = '#166534';
-          }
+        if (holdEl) {
+          holdEl.textContent = `${reviewRemaining}s left (closes to Pending Approvals tab)`;
+          holdEl.style.color = '#0284c7';
         }
 
         if (timeoutEl) {
@@ -731,7 +793,32 @@ function showNotificationPopup(notification) {
   }
   modal.classList.remove('hidden');
 }
-async function respondToNotification(id, action) { if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; } try { const res = await apiRequest(`/api/notifications/${id}/respond`, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ action, allow: action === 'allow' }) }); $('#notificationModal').classList.add('hidden'); if (res && res.message) alert(res.message); await loadDashboard(); } catch (e) { alert(e.message); } }
+
+async function clearNotification(id) {
+  try {
+    await apiRequest(`/api/notifications/${id}`, { method: 'DELETE', headers: authHeaders() });
+    await loadNotifications(false);
+    if (state.page === 'notifications') renderAdmin();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function respondToNotification(id, action) {
+  if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
+  try {
+    const res = await apiRequest(`/api/notifications/${id}/respond`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ action, allow: action === 'allow' })
+    });
+    $('#notificationModal').classList.add('hidden');
+    if (res && res.message) alert(res.message);
+    await loadDashboard();
+  } catch (e) {
+    alert(e.message);
+  }
+}
 async function loadDashboard() { try { const profile = await apiRequest('/api/profile', { headers: authHeaders() }); if (profile.user.role === 'user') return renderUserDashboard(await apiRequest('/api/user-dashboard', { headers: authHeaders() })); state.data = await apiRequest('/api/dashboard', { headers: authHeaders() }); $('#authSection').classList.add('hidden'); $('#dashboard').classList.remove('hidden'); $('#userDashboard').classList.add('hidden'); $('#locationCount').textContent = state.data.stats.totalLocations; $('#deviceCount').textContent = state.data.stats.totalDevices; await loadNotifications(); await loadOpenWrtRouters(); const extraClients = (state.routers || []).flatMap((r) => r.clients || []).filter((cl) => { const mac = (cl.mac || '').toLowerCase(); return !state.data.users.some((u) => (u.email || '').toLowerCase() === mac || u.id === 'user-mac-' + mac.replace(/[^a-z0-9]/g, '')); }); $('#userCount').textContent = state.data.users.filter((user) => user.role !== 'super_admin').length + extraClients.length; state.page = location.hash.slice(1) || (profile.user.role === 'super_admin' ? 'users' : 'overview'); if (!pageMeta(state.page) || (state.page === 'super-admin' && profile.user.role !== 'super_admin')) state.page = profile.user.role === 'super_admin' ? 'users' : 'overview'; if (state.page === 'super-admin') state.page = 'users'; if (profile.user.role === 'super_admin') await loadSuperAdmins(); renderAdmin(); } catch (e) { logout(); alert(e.message); } }
 async function login(e, endpoint) { e.preventDefault(); try { const data = await apiRequest(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.fromEntries(new FormData(e.currentTarget))) }); state.token = data.token; localStorage.setItem('secmynet-token', state.token); await loadDashboard(); } catch (err) { alert(err.message); } }
 async function register(e) { e.preventDefault(); const form = e.currentTarget; const values = Object.fromEntries(new FormData(form)); const error = $('#passwordError'); if (values.password !== values.confirmPassword) { error.textContent = 'Passwords do not match.'; $('#confirmPassword').focus(); return; } error.textContent = ''; delete values.confirmPassword; try { const data = await apiRequest('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) }); state.token = data.token; localStorage.setItem('secmynet-token', state.token); await loadDashboard(); } catch (err) { alert(err.message); } }
@@ -739,4 +826,4 @@ function togglePassword(id, button) { const input = $(`#${id}`); const isVisible
 function showLoginCard() { $('#loginCard').classList.remove('hidden'); $('#registerCard').classList.add('hidden'); }
 function showRegisterCard() { $('#loginCard').classList.add('hidden'); $('#registerCard').classList.remove('hidden'); }
 function logout() { state.token = ''; state.data = null; localStorage.removeItem('secmynet-token'); sessionStorage.removeItem('secmynet-session-start'); $('#authSection').classList.remove('hidden'); $('#dashboard').classList.add('hidden'); $('#userDashboard').classList.add('hidden'); $('#adminIdentity').classList.add('hidden'); showLoginCard(); }
-$('#registerForm').addEventListener('submit', register); $('#loginForm').addEventListener('submit', (e) => login(e, '/api/login')); $('#showRegisterLink').addEventListener('click', showRegisterCard); $('#showLoginLink').addEventListener('click', showLoginCard); document.querySelectorAll('[data-password-toggle]').forEach((button) => button.addEventListener('click', () => togglePassword(button.dataset.passwordToggle, button))); $('#confirmPassword').addEventListener('input', () => { const matches = $('#registerPassword').value === $('#confirmPassword').value; $('#passwordError').textContent = $('#confirmPassword').value && !matches ? 'Passwords do not match.' : ''; }); $('#userLogoutBtn').addEventListener('click', logout); $('#adminIdentityLogout').addEventListener('click', logout); $('#sidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-page]'); if (a) { e.preventDefault(); navigate(a.dataset.page); } }); $('#userSidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-user-page]'); if (a) { e.preventDefault(); state.userPage = a.dataset.userPage; history.replaceState(null, '', `#my-${state.userPage}`); renderUserPage(); } }); $('#backToListBtn').addEventListener('click', () => { state.selected = null; renderAdmin(); }); document.addEventListener('click', (e) => { const button = e.target.closest('[data-notification-response]'); if (button) { const [id, action] = button.dataset.notificationResponse.split('|'); respondToNotification(id, action); } }); if (state.token) { loadDashboard(); setInterval(() => loadNotifications(), 20000); }
+$('#registerForm').addEventListener('submit', register); $('#loginForm').addEventListener('submit', (e) => login(e, '/api/login')); $('#showRegisterLink').addEventListener('click', showRegisterCard); $('#showLoginLink').addEventListener('click', showLoginCard); document.querySelectorAll('[data-password-toggle]').forEach((button) => button.addEventListener('click', () => togglePassword(button.dataset.passwordToggle, button))); $('#confirmPassword').addEventListener('input', () => { const matches = $('#registerPassword').value === $('#confirmPassword').value; $('#passwordError').textContent = $('#confirmPassword').value && !matches ? 'Passwords do not match.' : ''; }); $('#userLogoutBtn').addEventListener('click', logout); $('#adminIdentityLogout').addEventListener('click', logout); $('#sidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-page]'); if (a) { e.preventDefault(); navigate(a.dataset.page); } }); $('#userSidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-user-page]'); if (a) { e.preventDefault(); state.userPage = a.dataset.userPage; history.replaceState(null, '', `#my-${state.userPage}`); renderUserPage(); } }); $('#backToListBtn').addEventListener('click', () => { state.selected = null; renderAdmin(); }); document.addEventListener('click', (e) => { const button = e.target.closest('[data-notification-response]'); if (button) { const [id, action] = button.dataset.notificationResponse.split('|'); respondToNotification(id, action); } const clearBtn = e.target.closest('[data-notification-clear]'); if (clearBtn) { clearNotification(clearBtn.dataset.notificationClear); } const tabBtn = e.target.closest('[data-notif-tab]'); if (tabBtn) { state.notificationTab = tabBtn.dataset.notifTab; renderAdmin(); } }); if (state.token) { loadDashboard(); setInterval(() => loadNotifications(), 20000); }
