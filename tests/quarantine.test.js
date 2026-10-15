@@ -347,4 +347,93 @@ test('Quarantine 5-minute timeout auto-disallow and expiration rejection', async
   assert.ok(blkCmd, 'Block command must be queued on 5m timeout auto-disallow');
 });
 
+test('Client quarantine status endpoint and captive holding notification page', async (t) => {
+  let server;
+  let baseUrl;
+
+  await new Promise((resolve) => {
+    server = app.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      baseUrl = `http://127.0.0.1:${port}`;
+      resolve();
+    });
+  });
+
+  t.after(() => {
+    if (server) server.close();
+  });
+
+  // 1. Verify holding page and captive probe redirect
+  const holdingRes = await fetch(`${baseUrl}/holding.html`);
+  assert.equal(holdingRes.status, 200);
+  const holdingHtml = await holdingRes.text();
+  assert.ok(holdingHtml.includes('Service Approval Pending'));
+
+  const probeRes = await fetch(`${baseUrl}/generate_204`, { redirect: 'manual' });
+  assert.equal(probeRes.status, 302);
+  assert.equal(probeRes.headers.get('location'), '/holding.html');
+
+  // 2. Admin Login & Router Registration
+  const loginRes = await fetch(`${baseUrl}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'admin@secmynet.com', password: 'Admin@123' })
+  });
+  const { token: adminToken } = await loginRes.json();
+
+  const routerRes = await fetch(`${baseUrl}/api/openwrt/routers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ name: 'Captive-Test-Router' })
+  });
+  const { routerId, agentToken } = await routerRes.json();
+
+  const clientMac = `02:00:00:cc:dd:${Math.floor(Math.random() * 89 + 10)}`;
+
+  // 3. Post telemetry for new client
+  await fetch(`${baseUrl}/api/openwrt/routers/${routerId}/telemetry`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-SecMyNet-Agent-Token': agentToken },
+    body: JSON.stringify({
+      clients: [{ mac: clientMac, ip: '192.168.1.177', hostname: 'Galaxy-Tester', rx_bytes: 512, tx_bytes: 512 }],
+      usage: []
+    })
+  });
+  await new Promise((r) => setTimeout(r, 600));
+
+  // 4. Client queries /api/client/status?mac=...
+  const statusRes = await fetch(`${baseUrl}/api/client/status?mac=${clientMac}`);
+  assert.equal(statusRes.status, 200);
+  const statusData = await statusRes.json();
+  assert.equal(statusData.status, 'quarantine');
+  assert.equal(statusData.approved, false);
+  assert.equal(statusData.message, 'Service Approval pending from owner of the Router');
+  assert.ok(statusData.holdRemainingSeconds > 0);
+
+  // 5. Owner approves the client
+  const notifRes = await fetch(`${baseUrl}/api/notifications`, { headers: { Authorization: `Bearer ${adminToken}` } });
+  const { notifications } = await notifRes.json();
+  const notif = notifications.find((n) => n.message && n.message.includes(clientMac));
+  assert.ok(notif);
+
+  // Release device
+  const db = require('../db');
+  await db.run("UPDATE notifications SET min_quarantine_until = $1 WHERE id = $2", [new Date(Date.now() - 1000).toISOString(), notif.id]);
+  const approveRes = await fetch(`${baseUrl}/api/notifications/${notif.id}/respond`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ action: 'allow' })
+  });
+  assert.equal(approveRes.status, 200);
+
+  // 6. Client re-queries status -> must now be approved!
+  const statusAfterRes = await fetch(`${baseUrl}/api/client/status?mac=${clientMac}`);
+  assert.equal(statusAfterRes.status, 200);
+  const statusAfterData = await statusAfterRes.json();
+  assert.equal(statusAfterData.status, 'allowed');
+  assert.equal(statusAfterData.approved, true);
+  assert.ok(statusAfterData.message.includes('Access Approved by Owner'));
+});
+
+
 

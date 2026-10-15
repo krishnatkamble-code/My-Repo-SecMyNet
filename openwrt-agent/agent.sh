@@ -1,6 +1,6 @@
 #!/bin/sh
 # SecMyNet OpenWrt Agent
-# Collects station info and telemetry and posts to SecMyNet server
+# Collects station info and telemetry, enforces Zero-Trust NAC quarantine, and posts to SecMyNet server
 
 if [ -f /etc/secmynet-agent.conf ]; then
   . /etc/secmynet-agent.conf
@@ -8,9 +8,9 @@ elif [ -f /etc/secmynet-agent/agent.conf ]; then
   . /etc/secmynet-agent/agent.conf
 fi
 
-SERVER_URL=${SERVER_URL:-${SECMYNET_URL:-http://192.168.1.144:3000}}
+SERVER_URL=${SERVER_URL:-${SECMYNET_URL:-https://my-repo-sec-my-net.vercel.app}}
 SERVER_URL="$(printf '%s' "${SERVER_URL%/}" | tr -d '\r\n ')"
-ROUTER_ID=${ROUTER_ID:-${SECMYNET_ROUTER_ID:-558971}}
+ROUTER_ID=${ROUTER_ID:-${SECMYNET_ROUTER_ID:-931354}}
 ROUTER_ID="$(printf '%s' "$ROUTER_ID" | tr -d '\r\n ')"
 TOKEN_FILE=${TOKEN_FILE:-/etc/secmynet-agent/token}
 STATE_FILE=${STATE_FILE:-/var/run/secmynet-agent/state.json}
@@ -33,6 +33,147 @@ read_token() {
     tok="pw9SafCxXCaLWQgIJA5NfIV2e4gORb3PWZgTV3i-ojI"
   fi
   printf '%s' "$tok" | tr -d '\r\n '
+}
+
+init_firewall() {
+  mkdir -p /etc/secmynet-agent
+
+  # 1. nftables support (OpenWrt 22.03+, fw4)
+  if command -v nft >/dev/null 2>&1; then
+    nft add table inet secmynet 2>/dev/null || true
+    nft add set inet secmynet quarantined_macs '{ type ether_addr; flags interval; }' 2>/dev/null || true
+    nft add set inet secmynet quarantined_ips '{ type ipv4_addr; flags interval; }' 2>/dev/null || true
+
+    # NAT Prerouting: redirect HTTP port 80 to captive portal on port 8080
+    nft add chain inet secmynet prerouting '{ type nat hook prerouting priority -100; policy accept; }' 2>/dev/null || true
+    nft flush chain inet secmynet prerouting 2>/dev/null || true
+    nft add rule inet secmynet prerouting ether saddr @quarantined_macs tcp dport 80 redirect to 8080 2>/dev/null || true
+    nft add rule inet secmynet prerouting ip saddr @quarantined_ips tcp dport 80 redirect to 8080 2>/dev/null || true
+
+    # Forward Hook: priority -10 (evaluated before fw4 default forwarding rules)
+    nft add chain inet secmynet forward '{ type filter hook forward priority -10; policy accept; }' 2>/dev/null || true
+    nft flush chain inet secmynet forward 2>/dev/null || true
+    # Preserve DNS (port 53) to router
+    nft add rule inet secmynet forward ether saddr @quarantined_macs udp dport 53 accept 2>/dev/null || true
+    nft add rule inet secmynet forward ether saddr @quarantined_macs tcp dport 53 accept 2>/dev/null || true
+    nft add rule inet secmynet forward ip saddr @quarantined_ips udp dport 53 accept 2>/dev/null || true
+    nft add rule inet secmynet forward ip saddr @quarantined_ips tcp dport 53 accept 2>/dev/null || true
+    # Drop all other forwarding to WAN for quarantined clients
+    nft add rule inet secmynet forward ether saddr @quarantined_macs counter drop 2>/dev/null || true
+    nft add rule inet secmynet forward ip saddr @quarantined_ips counter drop 2>/dev/null || true
+    log "Initialized standalone nftables secmynet quarantine table."
+  fi
+
+  # 2. iptables support (OpenWrt 21.02 and older, fw3)
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -N SECMYNET_QUARANTINE 2>/dev/null || true
+    iptables -F SECMYNET_QUARANTINE 2>/dev/null || true
+    iptables -A SECMYNET_QUARANTINE -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+    iptables -A SECMYNET_QUARANTINE -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+    iptables -A SECMYNET_QUARANTINE -j DROP 2>/dev/null || true
+    iptables -C FORWARD -j SECMYNET_QUARANTINE 2>/dev/null || iptables -I FORWARD 1 -j SECMYNET_QUARANTINE 2>/dev/null || true
+
+    iptables -t nat -N SECMYNET_REDIRECT 2>/dev/null || true
+    iptables -t nat -F SECMYNET_REDIRECT 2>/dev/null || true
+    iptables -t nat -C PREROUTING -j SECMYNET_REDIRECT 2>/dev/null || iptables -t nat -I PREROUTING 1 -j SECMYNET_REDIRECT 2>/dev/null || true
+    log "Initialized iptables SECMYNET_QUARANTINE chains."
+  fi
+}
+
+setup_captive_portal() {
+  mkdir -p /www/secmynet
+  if [ -f /etc/secmynet-agent/holding.html ]; then
+    cp -f /etc/secmynet-agent/holding.html /www/secmynet/holding.html 2>/dev/null || true
+    cp -f /etc/secmynet-agent/holding.html /www/holding.html 2>/dev/null || true
+  fi
+
+  if command -v uci >/dev/null 2>&1 && [ -f /etc/config/uhttpd ]; then
+    if ! uci get uhttpd.secmynet >/dev/null 2>&1; then
+      uci set uhttpd.secmynet=uhttpd
+      uci add_list uhttpd.secmynet.listen_http='0.0.0.0:8080'
+      uci set uhttpd.secmynet.home='/www/secmynet'
+      uci set uhttpd.secmynet.index_page='holding.html'
+      uci set uhttpd.secmynet.error_page='/holding.html'
+      uci commit uhttpd 2>/dev/null || true
+      /etc/init.d/uhttpd restart 2>/dev/null || true
+      log "Configured OpenWrt uhttpd captive portal instance on port 8080"
+    fi
+  fi
+}
+
+apply_quarantine() {
+  mac="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  ip="$2"
+  [ -z "$mac" ] && return
+
+  if [ -z "$ip" ]; then
+    ip=$(grep -i "$mac" /tmp/dhcp.leases 2>/dev/null | cut -d' ' -f3)
+    [ -z "$ip" ] && ip=$(ip neigh 2>/dev/null | grep -i "$mac" | cut -d' ' -f1)
+  fi
+
+  mkdir -p /etc/secmynet-agent
+  grep -qi "$mac" /etc/secmynet-agent/quarantined_macs 2>/dev/null || echo "$mac" >> /etc/secmynet-agent/quarantined_macs
+  sed -i "/$mac/d" /etc/secmynet-agent/allowed_macs 2>/dev/null || true
+
+  # nftables
+  if command -v nft >/dev/null 2>&1; then
+    nft add element inet secmynet quarantined_macs "{ $mac }" 2>/dev/null || true
+    [ -n "$ip" ] && nft add element inet secmynet quarantined_ips "{ $ip }" 2>/dev/null || true
+  fi
+
+  # iptables
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -I SECMYNET_QUARANTINE 1 -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
+    [ -n "$ip" ] && iptables -I SECMYNET_QUARANTINE 1 -s "$ip" -j DROP 2>/dev/null || true
+    iptables -t nat -I SECMYNET_REDIRECT 1 -m mac --mac-source "$mac" -p tcp --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || true
+    [ -n "$ip" ] && iptables -t nat -I SECMYNET_REDIRECT 1 -s "$ip" -p tcp --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || true
+  fi
+
+  # Flush conntrack sockets so existing connections are instantly dropped
+  if command -v conntrack >/dev/null 2>&1; then
+    [ -n "$ip" ] && conntrack -D -s "$ip" 2>/dev/null || true
+    [ -n "$ip" ] && conntrack -D -d "$ip" 2>/dev/null || true
+  fi
+  ip route flush cache 2>/dev/null || true
+
+  log "Strict Quarantine Enforced: $mac ($ip) - WAN forwarding blocked, redirected to captive portal"
+}
+
+apply_allow() {
+  mac="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  ip="$2"
+  [ -z "$mac" ] && return
+
+  if [ -z "$ip" ]; then
+    ip=$(grep -i "$mac" /tmp/dhcp.leases 2>/dev/null | cut -d' ' -f3)
+    [ -z "$ip" ] && ip=$(ip neigh 2>/dev/null | grep -i "$mac" | cut -d' ' -f1)
+  fi
+
+  mkdir -p /etc/secmynet-agent
+  sed -i "/$mac/d" /etc/secmynet-agent/quarantined_macs 2>/dev/null || true
+  sed -i "/$mac/d" /etc/secmynet-agent/blocked_macs 2>/dev/null || true
+  grep -qi "$mac" /etc/secmynet-agent/allowed_macs 2>/dev/null || echo "$mac" >> /etc/secmynet-agent/allowed_macs
+
+  # nftables
+  if command -v nft >/dev/null 2>&1; then
+    nft delete element inet secmynet quarantined_macs "{ $mac }" 2>/dev/null || true
+    [ -n "$ip" ] && nft delete element inet secmynet quarantined_ips "{ $ip }" 2>/dev/null || true
+  fi
+
+  # iptables
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -D SECMYNET_QUARANTINE -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
+    [ -n "$ip" ] && iptables -D SECMYNET_QUARANTINE -s "$ip" -j DROP 2>/dev/null || true
+    iptables -t nat -D SECMYNET_REDIRECT -m mac --mac-source "$mac" -p tcp --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || true
+    [ -n "$ip" ] && iptables -t nat -D SECMYNET_REDIRECT -s "$ip" -p tcp --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || true
+  fi
+
+  if command -v uci >/dev/null 2>&1; then
+    uci del_list wireless.@wifi-iface[0].maclist="$mac" 2>/dev/null || true
+    uci commit wireless 2>/dev/null || true
+  fi
+
+  log "Quarantine Released: $mac ($ip) - WAN internet access granted by owner"
 }
 
 collect_clients() {
@@ -170,6 +311,7 @@ poll_commands() {
         mac=$(echo "$payload" | jq -r '.mac' 2>/dev/null)
         mkdir -p /etc/secmynet-agent
         echo "$mac" >> /etc/secmynet-agent/blocked_macs
+        apply_quarantine "$mac" ""
         if command -v uci >/dev/null 2>&1; then
           for ifname in $(uci show wireless | grep "\.maclist" | sed -E "s/.*\['?(.*)'?\].*/\\1/" | cut -d '.' -f1); do
             uci add_list wireless.@wifi-iface[0].maclist="$mac" 2>/dev/null || true
@@ -180,33 +322,13 @@ poll_commands() {
         ;;
       quarantine)
         mac=$(echo "$payload" | jq -r '.mac' 2>/dev/null)
-        mkdir -p /etc/secmynet-agent
-        [ -n "$mac" ] && echo "$mac" >> /etc/secmynet-agent/quarantined_macs
-        # Apply nftables/iptables quarantine rule to drop forwarding to WAN
-        if command -v nft >/dev/null 2>&1 && [ -n "$mac" ]; then
-          nft add element inet fw4 secmynet_quarantine "{ $mac }" 2>/dev/null || true
-        fi
-        if command -v iptables >/dev/null 2>&1 && [ -n "$mac" ]; then
-          iptables -I FORWARD -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
-        fi
-        log "Quarantined client: $mac"
+        ip=$(echo "$payload" | jq -r '.ip' 2>/dev/null)
+        apply_quarantine "$mac" "$ip"
         ;;
       allow)
         mac=$(echo "$payload" | jq -r '.mac' 2>/dev/null)
-        sed -i "/$mac/d" /etc/secmynet-agent/quarantined_macs 2>/dev/null || true
-        sed -i "/$mac/d" /etc/secmynet-agent/blocked_macs 2>/dev/null || true
-        if command -v nft >/dev/null 2>&1 && [ -n "$mac" ]; then
-          nft delete element inet fw4 secmynet_quarantine "{ $mac }" 2>/dev/null || true
-        fi
-        if command -v iptables >/dev/null 2>&1 && [ -n "$mac" ]; then
-          iptables -D FORWARD -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
-        fi
-        if command -v uci >/dev/null 2>&1; then
-          uci del_list wireless.@wifi-iface[0].maclist="$mac" 2>/dev/null || true
-          uci commit wireless 2>/dev/null || true
-          wifi reload 2>/dev/null || true
-        fi
-        log "Released from quarantine and allowed: $mac"
+        ip=$(echo "$payload" | jq -r '.ip' 2>/dev/null)
+        apply_allow "$mac" "$ip"
         ;;
       restart)
         wifi reload 2>/dev/null || reboot 2>/dev/null || true
@@ -236,6 +358,8 @@ poll_commands() {
 
 main() {
   mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+  init_firewall
+  setup_captive_portal
   while true; do
     post_telemetry || true
     poll_commands || true
@@ -243,7 +367,24 @@ main() {
   done
 }
 
+if [ "$1" = "--init" ]; then
+  init_firewall
+  setup_captive_portal
+  exit 0
+fi
+
+if [ "$1" = "--quarantine" ]; then
+  apply_quarantine "$2" "$3"
+  exit 0
+fi
+
+if [ "$1" = "--allow" ]; then
+  apply_allow "$2" "$3"
+  exit 0
+fi
+
 if [ "$1" = "--once" ]; then
+  init_firewall
   post_telemetry
   poll_commands
   exit $?

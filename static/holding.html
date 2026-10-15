@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Service Approval Pending | SecMyNet NAC</title>
+  <style>
+    :root {
+      --primary: #1e40af;
+      --primary-hover: #1d4ed8;
+      --bg: #0f172a;
+      --card-bg: rgba(30, 41, 59, 0.75);
+      --card-border: rgba(255, 255, 255, 0.12);
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --warning: #f59e0b;
+      --warning-bg: rgba(245, 158, 11, 0.15);
+      --warning-border: rgba(245, 158, 11, 0.35);
+      --success: #10b981;
+      --success-bg: rgba(16, 185, 129, 0.15);
+      --success-border: rgba(16, 185, 129, 0.35);
+      --danger: #ef4444;
+      --danger-bg: rgba(239, 68, 68, 0.15);
+      --danger-border: rgba(239, 68, 68, 0.35);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: radial-gradient(circle at 50% 20%, #1e293b 0%, #0f172a 100%);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      -webkit-font-smoothing: antialiased;
+    }
+    .container {
+      width: 100%;
+      max-width: 480px;
+      margin: 0 auto;
+    }
+    .brand-header {
+      text-align: center;
+      margin-bottom: 20px;
+    }
+    .brand-logo {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 52px;
+      height: 52px;
+      background: linear-gradient(135deg, #2563eb, #1d4ed8);
+      border-radius: 14px;
+      box-shadow: 0 8px 20px rgba(37, 99, 235, 0.35);
+      margin-bottom: 12px;
+      font-size: 26px;
+    }
+    .brand-title {
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #fff;
+    }
+    .brand-subtitle {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+    .card {
+      background: var(--card-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--card-border);
+      border-radius: 20px;
+      padding: 24px 20px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+      transition: all 0.3s ease;
+    }
+    .status-icon-wrapper {
+      position: relative;
+      width: 80px;
+      height: 80px;
+      margin: 0 auto 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .status-pulse {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background: var(--warning);
+      opacity: 0.25;
+      animation: pulse 2s infinite ease-out;
+    }
+    @keyframes pulse {
+      0% { transform: scale(0.8); opacity: 0.5; }
+      50% { transform: scale(1.2); opacity: 0.15; }
+      100% { transform: scale(0.8); opacity: 0.5; }
+    }
+    .status-icon {
+      position: relative;
+      width: 64px;
+      height: 64px;
+      border-radius: 50%;
+      background: var(--warning-bg);
+      border: 2px solid var(--warning);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 30px;
+      color: var(--warning);
+      transition: all 0.4s ease;
+    }
+    .status-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      line-height: 1.3;
+      margin-bottom: 8px;
+      color: #fef08a;
+    }
+    .status-desc {
+      font-size: 0.92rem;
+      color: var(--text-muted);
+      line-height: 1.45;
+      margin-bottom: 20px;
+    }
+    .info-box {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 14px;
+      text-align: left;
+      margin-bottom: 18px;
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      font-size: 0.85rem;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    .info-row:last-child {
+      border-bottom: none;
+    }
+    .info-label {
+      color: var(--text-muted);
+    }
+    .info-val {
+      font-weight: 600;
+      color: #e2e8f0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+    .badge-warning {
+      background: var(--warning-bg);
+      color: #fbbf24;
+      border: 1px solid var(--warning-border);
+    }
+    .badge-success {
+      background: var(--success-bg);
+      color: #34d399;
+      border: 1px solid var(--success-border);
+    }
+    .badge-danger {
+      background: var(--danger-bg);
+      color: #f87171;
+      border: 1px solid var(--danger-border);
+    }
+    .hold-box {
+      background: rgba(245, 158, 11, 0.1);
+      border: 1px dashed var(--warning-border);
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin-bottom: 18px;
+      font-size: 0.86rem;
+      color: #fde68a;
+    }
+    .hold-countdown {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #fbbf24;
+      margin-top: 4px;
+    }
+    .refresh-btn {
+      width: 100%;
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 12px;
+      padding: 12px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: background 0.2s ease, transform 0.1s ease;
+    }
+    .refresh-btn:hover {
+      background: var(--primary-hover);
+    }
+    .refresh-btn:active {
+      transform: scale(0.98);
+    }
+    .refresh-indicator {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      margin-top: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+    .dot-live {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--warning);
+      animation: blink 1.4s infinite;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 0.3; }
+      50% { opacity: 1; }
+    }
+    /* Approved State */
+    .card.approved {
+      border-color: var(--success-border);
+    }
+    .card.approved .status-icon {
+      background: var(--success-bg);
+      border-color: var(--success);
+      color: var(--success);
+    }
+    .card.approved .status-pulse {
+      background: var(--success);
+    }
+    .card.approved .status-title {
+      color: #6ee7b7;
+    }
+    /* Denied State */
+    .card.denied {
+      border-color: var(--danger-border);
+    }
+    .card.denied .status-icon {
+      background: var(--danger-bg);
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+    .card.denied .status-pulse {
+      display: none;
+    }
+    .card.denied .status-title {
+      color: #fca5a5;
+    }
+    .policy-note {
+      margin-top: 22px;
+      font-size: 0.76rem;
+      color: #64748b;
+      line-height: 1.4;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="brand-header">
+      <div class="brand-logo">🛡️</div>
+      <h1 class="brand-title">SecMyNet NAC</h1>
+      <p class="brand-subtitle">Zero-Trust Network Access Control</p>
+    </header>
+
+    <main id="statusCard" class="card">
+      <div class="status-icon-wrapper">
+        <div id="statusPulse" class="status-pulse"></div>
+        <div id="statusIcon" class="status-icon">⏳</div>
+      </div>
+
+      <h2 id="statusTitle" class="status-title">Service Approval Pending</h2>
+      <p id="statusDesc" class="status-desc">
+        Your device is connected to the router, but internet access is held in quarantine until approved by the owner of the router.
+      </p>
+
+      <div id="holdBox" class="hold-box">
+        <div>⏱️ Mandatory Evaluation Hold</div>
+        <div id="holdCountdown" class="hold-countdown">45s hold in progress</div>
+      </div>
+
+      <div class="info-box">
+        <div class="info-row">
+          <span class="info-label">Network Status</span>
+          <span id="badgeStatus" class="badge badge-warning">Quarantine Holding</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Device Name</span>
+          <span id="clientName" class="info-val">Detecting...</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">MAC Address</span>
+          <span id="clientMac" class="info-val">--:--:--:--:--:--</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">IP Address</span>
+          <span id="clientIp" class="info-val">...</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Auto-Disallow Timeout</span>
+          <span id="timeoutRemaining" class="info-val">5m 00s</span>
+        </div>
+      </div>
+
+      <button id="refreshBtn" class="refresh-btn" type="button">
+        <span>Check Approval Status</span>
+      </button>
+
+      <div class="refresh-indicator">
+        <div id="dotLive" class="dot-live"></div>
+        <span id="liveStatusText">Live checking every 2.5 seconds...</span>
+      </div>
+    </main>
+
+    <footer class="policy-note">
+      This network enforces Zero-Trust NAC. All connecting clients are quarantined for at least 45 seconds before approval, and automatically disallowed after 5 minutes if no owner approval is granted.
+    </footer>
+  </div>
+
+  <script>
+    (function () {
+      const urlParams = new URLSearchParams(window.location.search);
+      let clientMac = urlParams.get('mac') || urlParams.get('MAC') || '';
+      let clientIp = urlParams.get('ip') || urlParams.get('IP') || '';
+
+      const card = document.getElementById('statusCard');
+      const statusIcon = document.getElementById('statusIcon');
+      const statusTitle = document.getElementById('statusTitle');
+      const statusDesc = document.getElementById('statusDesc');
+      const holdBox = document.getElementById('holdBox');
+      const holdCountdown = document.getElementById('holdCountdown');
+      const badgeStatus = document.getElementById('badgeStatus');
+      const clientNameEl = document.getElementById('clientName');
+      const clientMacEl = document.getElementById('clientMac');
+      const clientIpEl = document.getElementById('clientIp');
+      const timeoutEl = document.getElementById('timeoutRemaining');
+      const refreshBtn = document.getElementById('refreshBtn');
+      const dotLive = document.getElementById('dotLive');
+      const liveStatusText = document.getElementById('liveStatusText');
+
+      if (clientMac) clientMacEl.textContent = clientMac.toUpperCase();
+      if (clientIp) clientIpEl.textContent = clientIp;
+
+      let isApproved = false;
+      let checkTimer = null;
+
+      async function fetchStatus() {
+        try {
+          const query = new URLSearchParams();
+          if (clientMac) query.set('mac', clientMac);
+          if (clientIp) query.set('ip', clientIp);
+
+          // Check either local router endpoint or server API
+          const endpoint = `/api/client/status?${query.toString()}`;
+          const res = await fetch(endpoint, { cache: 'no-store' });
+          if (!res.ok) throw new Error('Status query failed');
+          const data = await res.json();
+          updateUI(data);
+        } catch (err) {
+          console.warn('Status poll:', err);
+        }
+      }
+
+      function updateUI(data) {
+        if (!data) return;
+        if (data.mac && !clientMac) {
+          clientMac = data.mac;
+          clientMacEl.textContent = data.mac.toUpperCase();
+        }
+        if (data.ip && !clientIp) {
+          clientIp = data.ip;
+          clientIpEl.textContent = data.ip;
+        }
+        if (data.name) clientNameEl.textContent = data.name;
+
+        // Auto-disallow / 5-minute timeout
+        if (data.status === 'quarantine_auto_denied' || (data.timeoutRemainingSeconds === 0 && data.status !== 'allowed')) {
+          card.className = 'card denied';
+          statusIcon.textContent = '❌';
+          statusTitle.textContent = 'Connection Disallowed';
+          statusDesc.textContent = 'Your connection request timed out after 5 minutes with no owner approval and was disallowed.';
+          badgeStatus.className = 'badge badge-danger';
+          badgeStatus.textContent = 'Disallowed (5m Timeout)';
+          holdBox.style.display = 'none';
+          timeoutEl.textContent = 'Expired (Disallowed)';
+          liveStatusText.textContent = 'Access Disallowed by Router Policy';
+          dotLive.style.background = '#ef4444';
+          clearInterval(checkTimer);
+          return;
+        }
+
+        // Explicit Deny
+        if (data.status === 'denied') {
+          card.className = 'card denied';
+          statusIcon.textContent = '🚫';
+          statusTitle.textContent = 'Connection Denied';
+          statusDesc.textContent = 'The owner of the router denied your connection request.';
+          badgeStatus.className = 'badge badge-danger';
+          badgeStatus.textContent = 'Denied by Owner';
+          holdBox.style.display = 'none';
+          liveStatusText.textContent = 'Access Denied';
+          dotLive.style.background = '#ef4444';
+          clearInterval(checkTimer);
+          return;
+        }
+
+        // Approved
+        if (data.approved || data.status === 'allowed') {
+          isApproved = true;
+          card.className = 'card approved';
+          statusIcon.textContent = '✅';
+          statusTitle.textContent = 'Access Approved by Owner!';
+          statusDesc.textContent = 'Your device has been approved. WAN internet access is now unlocked!';
+          badgeStatus.className = 'badge badge-success';
+          badgeStatus.textContent = 'Connected & Allowed';
+          holdBox.style.display = 'none';
+          timeoutEl.textContent = 'Active Session';
+          refreshBtn.textContent = 'Internet Active — Enjoy Browsing!';
+          refreshBtn.style.background = '#10b981';
+          liveStatusText.textContent = 'Connected to Internet';
+          dotLive.style.background = '#10b981';
+          clearInterval(checkTimer);
+          return;
+        }
+
+        // Mandatory Evaluation Hold
+        if (data.holdRemainingSeconds > 0) {
+          holdBox.style.display = 'block';
+          holdCountdown.textContent = `${data.holdRemainingSeconds}s evaluation hold in progress`;
+          statusTitle.textContent = 'Service Approval Pending';
+          statusDesc.textContent = 'Service Approval pending from owner of the Router. Security policy holds your device for at least 45 seconds.';
+          badgeStatus.className = 'badge badge-warning';
+          badgeStatus.textContent = `Holding (${data.holdRemainingSeconds}s)`;
+        } else if (data.status === 'approved_holding') {
+          holdBox.style.display = 'block';
+          holdCountdown.textContent = 'Releasing WAN internet traffic...';
+          statusTitle.textContent = 'Owner Approved — Releasing Hold';
+          badgeStatus.className = 'badge badge-success';
+          badgeStatus.textContent = 'Unlocking WAN';
+        } else {
+          holdBox.style.display = 'block';
+          holdCountdown.textContent = 'Passed (Awaiting Owner Click)';
+          statusTitle.textContent = 'Service Approval Pending';
+          statusDesc.textContent = 'Service Approval pending from owner of the Router. Evaluation hold completed. Awaiting owner approval.';
+          badgeStatus.className = 'badge badge-warning';
+          badgeStatus.textContent = 'Waiting for Owner';
+        }
+
+        if (data.timeoutRemainingSeconds > 0) {
+          const m = Math.floor(data.timeoutRemainingSeconds / 60);
+          const s = String(data.timeoutRemainingSeconds % 60).padStart(2, '0');
+          timeoutEl.textContent = `${m}m ${s}s`;
+        }
+      }
+
+      refreshBtn.addEventListener('click', () => {
+        refreshBtn.textContent = 'Checking...';
+        fetchStatus().finally(() => {
+          if (!isApproved) refreshBtn.textContent = 'Check Approval Status';
+        });
+      });
+
+      fetchStatus();
+      checkTimer = setInterval(fetchStatus, 2500);
+    })();
+  </script>
+</body>
+</html>

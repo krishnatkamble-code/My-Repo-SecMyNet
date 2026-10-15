@@ -1990,6 +1990,96 @@ app.post('/api/connections/:connectionId/usage', authRequired, adminRequired, as
   res.json({ message: 'Usage updated.', connection: { ...connection, dataUsedMb: nextUsage } });
 });
 
+// Client status endpoint for quarantined devices to check approval state
+app.get('/api/client/status', async (req, res) => {
+  await ensureDb();
+  let mac = (req.query.mac || req.query.MAC || '').trim().toLowerCase();
+  let ip = (req.query.ip || req.query.IP || req.headers['x-forwarded-for'] || req.socket?.remoteAddress || '').trim();
+  if (ip.includes(',')) ip = ip.split(',')[0].trim();
+  if (ip.startsWith('::ffff:')) ip = ip.replace('::ffff:', '');
+
+  let user = null;
+  if (mac) {
+    const userId = 'user-mac-' + mac.replace(/[^a-z0-9]/g, '');
+    user = await get('SELECT * FROM users WHERE id = $1', [userId]);
+  }
+  if (!user && ip) {
+    user = await get('SELECT * FROM users WHERE mobile_number = $1 ORDER BY created_at DESC LIMIT 1', [ip]);
+    if (user && user.email) mac = user.email.toLowerCase();
+  }
+
+  let latestNotif = null;
+  if (user || mac) {
+    latestNotif = await get(
+      "SELECT * FROM notifications WHERE type = 'connection_request' AND (user_id = $1 OR message LIKE $2) ORDER BY created_at DESC LIMIT 1",
+      [user ? user.id : '', `%${mac}%`]
+    );
+  }
+
+  let activeConn = null;
+  if (user) {
+    activeConn = await get(
+      "SELECT * FROM connections WHERE user_id = $1 ORDER BY connected_at DESC LIMIT 1",
+      [user.id]
+    );
+  }
+
+  const now = Date.now();
+  let status = 'quarantine';
+  let message = 'Service Approval pending from owner of the Router';
+  let approved = false;
+  let holdRemainingSeconds = 0;
+  let timeoutRemainingSeconds = 0;
+
+  if (latestNotif) {
+    status = latestNotif.status;
+    const minHold = latestNotif.min_quarantine_until ? new Date(latestNotif.min_quarantine_until).getTime() : 0;
+    const expires = latestNotif.expires_at ? new Date(latestNotif.expires_at).getTime() : 0;
+    holdRemainingSeconds = Math.max(0, Math.ceil((minHold - now) / 1000));
+    timeoutRemainingSeconds = Math.max(0, Math.ceil((expires - now) / 1000));
+
+    if (status === 'allowed') {
+      approved = true;
+      message = 'Access Approved by Owner! You are now connected to the Internet.';
+    } else if (['denied', 'quarantine_auto_denied'].includes(status)) {
+      approved = false;
+      message = 'Connection request has been disallowed by the router owner.';
+    } else if (status === 'approved_holding') {
+      approved = false;
+      message = `Owner approved your connection! Security hold in progress (${holdRemainingSeconds}s remaining).`;
+    } else {
+      approved = false;
+      message = 'Service Approval pending from owner of the Router';
+    }
+  } else if (activeConn && activeConn.status === 'connected') {
+    status = 'allowed';
+    approved = true;
+    message = 'Access Approved by Owner! You are now connected to the Internet.';
+  }
+
+  res.json({
+    mac,
+    ip,
+    name: user ? user.name : (mac ? `Client (${mac.toUpperCase()})` : 'Connected Device'),
+    status,
+    message,
+    approved,
+    holdRemainingSeconds,
+    timeoutRemainingSeconds,
+    serverTime: new Date().toISOString()
+  });
+});
+
+// Captive portal holding landing page & detection routes
+app.get(['/holding', '/holding.html', '/quarantine'], (_req, res) => {
+  res.sendFile(path.join(__dirname, 'static', 'holding.html'));
+});
+
+// Captive portal probes for Android, iOS, Windows
+app.get(['/generate_204', '/gen_204', '/hotspot-detect.html', '/ncsi.txt', '/connecttest.txt'], (_req, res) => {
+  res.redirect('/holding.html');
+});
+
 app.get(['/superadmin', '/super-admin', '/superadmin/'], (_req, res) => {
   res.sendFile(path.join(__dirname, 'static', 'superadmin.html'));
 });
