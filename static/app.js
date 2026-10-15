@@ -193,7 +193,7 @@ function renderNotifications() {
   }
 
   const tabsHtml = `
-    <div class="notification-tabs" style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+    <div class="notification-tabs" style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">
       <button class="action-button ${activeTab === 'pending' ? 'active-tab' : ''}" data-notif-tab="pending" style="${activeTab === 'pending' ? 'background:#2d5aa8;color:#fff;font-weight:700;border-color:#2d5aa8;' : 'background:#fff;color:#334155;'}">
         ⏳ 1. Pending Approvals (${pendingItems.length})
       </button>
@@ -203,6 +203,14 @@ function renderNotifications() {
       <button class="action-button ${activeTab === 'disallowed' ? 'active-tab' : ''}" data-notif-tab="disallowed" style="${activeTab === 'disallowed' ? 'background:#475569;color:#fff;font-weight:700;border-color:#475569;' : 'background:#fff;color:#334155;'}">
         🚫 3. Disallowed / History (${disallowedItems.length})
       </button>
+      <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+        <button class="action-button secondary" data-notification-clear-tab="${activeTab}" style="background:#475569;color:#fff;font-weight:600;" title="Clear notifications in current tab">
+          🧹 Clear This Tab
+        </button>
+        <button class="action-button secondary" data-notification-clear-all="true" style="background:#b91c1c;color:#fff;border-color:#991b1b;font-weight:600;" title="Clear all notifications across all categories">
+          🗑️ Clear All
+        </button>
+      </div>
     </div>
   `;
 
@@ -808,6 +816,27 @@ async function clearNotification(id) {
   }
 }
 
+async function clearAllNotifications(tab = null) {
+  const allCount = (state.notifications || []).length;
+  if (allCount === 0) {
+    alert('No notifications to clear.');
+    return;
+  }
+  const tabLabel = tab === 'pending' ? 'Pending Approvals' : (tab === 'approved' ? 'Approved Requests' : (tab === 'disallowed' ? 'Disallowed / History' : ''));
+  const promptText = tab
+    ? `Are you sure you want to clear all ${tabLabel} notifications?`
+    : 'Are you sure you want to clear ALL notifications across all categories?';
+  if (!confirm(promptText)) return;
+  try {
+    const url = tab ? `/api/notifications?tab=${encodeURIComponent(tab)}` : '/api/notifications';
+    await apiRequest(url, { method: 'DELETE', headers: authHeaders() });
+    await loadNotifications(false);
+    if (state.page === 'notifications') renderAdmin();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
 async function respondToNotification(id, action) {
   if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
   try {
@@ -830,4 +859,4 @@ function togglePassword(id, button) { const input = $(`#${id}`); const isVisible
 function showLoginCard() { $('#loginCard').classList.remove('hidden'); $('#registerCard').classList.add('hidden'); }
 function showRegisterCard() { $('#loginCard').classList.add('hidden'); $('#registerCard').classList.remove('hidden'); }
 function logout() { state.token = ''; state.data = null; localStorage.removeItem('secmynet-token'); sessionStorage.removeItem('secmynet-session-start'); $('#authSection').classList.remove('hidden'); $('#dashboard').classList.add('hidden'); $('#userDashboard').classList.add('hidden'); $('#adminIdentity').classList.add('hidden'); showLoginCard(); }
-$('#registerForm').addEventListener('submit', register); $('#loginForm').addEventListener('submit', (e) => login(e, '/api/login')); $('#showRegisterLink').addEventListener('click', showRegisterCard); $('#showLoginLink').addEventListener('click', showLoginCard); document.querySelectorAll('[data-password-toggle]').forEach((button) => button.addEventListener('click', () => togglePassword(button.dataset.passwordToggle, button))); $('#confirmPassword').addEventListener('input', () => { const matches = $('#registerPassword').value === $('#confirmPassword').value; $('#passwordError').textContent = $('#confirmPassword').value && !matches ? 'Passwords do not match.' : ''; }); $('#userLogoutBtn').addEventListener('click', logout); $('#adminIdentityLogout').addEventListener('click', logout); $('#sidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-page]'); if (a) { e.preventDefault(); navigate(a.dataset.page); } }); $('#userSidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-user-page]'); if (a) { e.preventDefault(); state.userPage = a.dataset.userPage; history.replaceState(null, '', `#my-${state.userPage}`); renderUserPage(); } }); $('#backToListBtn').addEventListener('click', () => { state.selected = null; renderAdmin(); }); document.addEventListener('click', (e) => { const button = e.target.closest('[data-notification-response]'); if (button) { const [id, action] = button.dataset.notificationResponse.split('|'); respondToNotification(id, action); } const clearBtn = e.target.closest('[data-notification-clear]'); if (clearBtn) { clearNotification(clearBtn.dataset.notificationClear); } const tabBtn = e.target.closest('[data-notif-tab]'); if (tabBtn) { state.notificationTab = tabBtn.dataset.notifTab; renderAdmin(); } }); if (state.token) { loadDashboard(); setInterval(() => loadNotifications(), 20000); }
+$('#registerForm').addEventListener('submit', register); $('#loginForm').addEventListener('submit', (e) => login(e, '/api/login')); $('#showRegisterLink').addEventListener('click', showRegisterCard); $('#showLoginLink').addEventListener('click', showLoginCard); document.querySelectorAll('[data-password-toggle]').forEach((button) => button.addEventListener('click', () => togglePassword(button.dataset.passwordToggle, button))); $('#confirmPassword').addEventListener('input', () => { const matches = $('#registerPassword').value === $('#confirmPassword').value; $('#passwordError').textContent = $('#confirmPassword').value && !matches ? 'Passwords do not match.' : ''; }); $('#userLogoutBtn').addEventListener('click', logout); $('#adminIdentityLogout').addEventListener('click', logout); $('#sidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-page]'); if (a) { e.preventDefault(); navigate(a.dataset.page); } }); $('#userSidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-user-page]'); if (a) { e.preventDefault(); state.userPage = a.dataset.userPage; history.replaceState(null, '', `#my-${state.userPage}`); renderUserPage(); } }); $('#backToListBtn').addEventListener('click', () => { state.selected = null; renderAdmin(); }); document.addEventListener('click', (e) => { const button = e.target.closest('[data-notification-response]'); if (button) { const [id, action] = button.dataset.notificationResponse.split('|'); respondToNotification(id, action); } const clearBtn = e.target.closest('[data-notification-clear]'); if (clearBtn) { clearNotification(clearBtn.dataset.notificationClear); } const clearTabBtn = e.target.closest('[data-notification-clear-tab]'); if (clearTabBtn) { clearAllNotifications(clearTabBtn.dataset.notificationClearTab); } const clearAllBtn = e.target.closest('[data-notification-clear-all]'); if (clearAllBtn) { clearAllNotifications(null); } const tabBtn = e.target.closest('[data-notif-tab]'); if (tabBtn) { state.notificationTab = tabBtn.dataset.notifTab; renderAdmin(); } }); if (state.token) { loadDashboard(); setInterval(() => loadNotifications(), 20000); }

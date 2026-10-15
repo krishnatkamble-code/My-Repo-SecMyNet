@@ -1526,6 +1526,21 @@ app.post('/api/openwrt/routers/:routerId/commands/:commandId/complete', routerAg
   res.json({ ok: true });
 });
 
+app.delete('/api/notifications', authRequired, adminRequired, async (req, res) => {
+  await ensureDb();
+  const { tab } = req.query;
+  if (tab === 'history' || tab === 'disallowed') {
+    await run("DELETE FROM notifications WHERE status IN ('denied', 'disconnected', 'quarantine_auto_denied')");
+  } else if (tab === 'approved') {
+    await run("DELETE FROM notifications WHERE status = 'allowed'");
+  } else if (tab === 'pending') {
+    await run("DELETE FROM notifications WHERE status IN ('unread', 'quarantine', 'quarantine_wait', 'approved_holding')");
+  } else {
+    await run('DELETE FROM notifications');
+  }
+  res.json({ ok: true, message: 'Notifications cleared successfully.' });
+});
+
 app.delete('/api/notifications/:notificationId', authRequired, adminRequired, async (req, res) => {
   await ensureDb();
   await run('DELETE FROM notifications WHERE id = $1', [req.params.notificationId]);

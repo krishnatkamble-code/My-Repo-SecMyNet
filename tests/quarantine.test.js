@@ -492,5 +492,66 @@ test('Client quarantine status endpoint and captive holding notification page', 
   assert.ok(statusAfterData.message.includes('Access Approved by Owner'));
 });
 
+test('DELETE /api/notifications and tab clearing test', async (t) => {
+  let server;
+  let baseUrl;
+
+  await new Promise((resolve) => {
+    server = app.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      baseUrl = `http://127.0.0.1:${port}`;
+      resolve();
+    });
+  });
+
+  t.after(() => {
+    if (server) server.close();
+  });
+
+  // 1. Admin Login
+  const loginRes = await fetch(`${baseUrl}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'admin@secmynet.com', password: 'Admin@123' })
+  });
+  const { token: adminToken } = await loginRes.json();
+
+  const db = require('../db');
+  await db.initDb();
+  // Insert test notifications across categories with valid created_at timestamp
+  const now = new Date().toISOString();
+  await db.run("INSERT INTO notifications (id, type, status, message, created_at) VALUES ('test-notif-1', 'connection_request', 'quarantine', 'Client 1', $1)", [now]);
+  await db.run("INSERT INTO notifications (id, type, status, message, created_at) VALUES ('test-notif-2', 'connection_request', 'allowed', 'Client 2', $1)", [now]);
+  await db.run("INSERT INTO notifications (id, type, status, message, created_at) VALUES ('test-notif-3', 'connection_request', 'denied', 'Client 3', $1)", [now]);
+
+  // Clear specific tab (approved)
+  const clearApprovedRes = await fetch(`${baseUrl}/api/notifications?tab=approved`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  assert.equal(clearApprovedRes.status, 200);
+
+  const afterTabRes = await fetch(`${baseUrl}/api/notifications`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  const { notifications: notifsAfterTab } = await afterTabRes.json();
+  assert.ok(!notifsAfterTab.some((n) => n.id === 'test-notif-2'), 'Approved notification should be deleted');
+  assert.ok(notifsAfterTab.some((n) => n.id === 'test-notif-1'), 'Pending notification should remain');
+  assert.ok(notifsAfterTab.some((n) => n.id === 'test-notif-3'), 'Denied notification should remain');
+
+  // Clear all
+  const clearAllRes = await fetch(`${baseUrl}/api/notifications`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  assert.equal(clearAllRes.status, 200);
+
+  const afterAllRes = await fetch(`${baseUrl}/api/notifications`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  const { notifications: notifsAfterAll } = await afterAllRes.json();
+  assert.equal(notifsAfterAll.length, 0, 'All notifications should be cleared');
+});
+
 
 
