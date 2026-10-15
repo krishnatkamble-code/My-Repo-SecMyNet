@@ -149,12 +149,9 @@ function renderNotifications() {
     if (isPending && isConn) {
       if (timeoutRemaining === 0) {
         actions = `<span class="status-badge blocked">Disallowed (5m Timeout)</span>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;margin-left:6px;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
-      } else if (n.status === 'approved_holding') {
-        actions = `<button class="action-button" style="background:#475569;color:#fff;opacity:0.75;cursor:not-allowed;" disabled data-quarantine-hold="${minHold}">Releasing in ${holdRemaining}s...</button><button class="action-button danger" data-notification-response="${n.id}|deny">Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
-      } else if (holdRemaining > 0) {
-        actions = `<button class="action-button" style="background:#475569;color:#fff;opacity:0.6;cursor:not-allowed;" disabled data-quarantine-hold="${minHold}" data-notification-id="${n.id}" title="Quarantine evaluation hold in progress (${holdRemaining}s left)">Allow (${holdRemaining}s hold)</button><button class="action-button" style="background:#f59e0b;color:#fff;" data-notification-response="${n.id}|wait">Wait (5m)</button><button class="action-button danger" data-notification-response="${n.id}|deny">Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
       } else {
-        actions = `<button class="action-button" style="background:#166534;color:#fff;" data-notification-response="${n.id}|allow">Allow Access</button><button class="action-button" style="background:#f59e0b;color:#fff;" data-notification-response="${n.id}|wait">Wait (5m)</button><button class="action-button danger" data-notification-response="${n.id}|deny">Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+        const holdTag = holdRemaining > 0 ? `<span class="status-badge" style="background:#fef3c7;color:#92400e;font-size:0.75rem;margin-right:6px;" data-quarantine-hold="${minHold}">Hold ${holdRemaining}s</span>` : '';
+        actions = `${holdTag}<button class="action-button" style="background:#166534;color:#fff;" data-notification-response="${n.id}|allow">Allow Access</button><button class="action-button" style="background:#f59e0b;color:#fff;" data-notification-response="${n.id}|wait">Wait (5m)</button><button class="action-button danger" data-notification-response="${n.id}|deny">Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
       }
     } else if (n.status === 'unread' && n.type === 'overconsumption') {
       actions = `<button class="action-button" data-notification-response="${n.id}|continue">Allow Further</button><button class="action-button danger" data-notification-response="${n.id}|disconnect">Disconnect</button>`;
@@ -171,17 +168,13 @@ function renderNotifications() {
     if (state.page !== 'notifications') { clearInterval(notificationsLiveTimer); notificationsLiveTimer = null; return; }
     const curr = Date.now();
     let needsReRender = false;
-    document.querySelectorAll('[data-quarantine-hold]').forEach((btn) => {
-      const target = Number(btn.dataset.quarantineHold);
+    document.querySelectorAll('[data-quarantine-hold]').forEach((el) => {
+      const target = Number(el.dataset.quarantineHold);
       const rem = Math.max(0, Math.ceil((target - curr) / 1000));
       if (rem > 0) {
-        if (btn.textContent.includes('Releasing')) {
-          btn.textContent = `Releasing in ${rem}s...`;
-        } else {
-          btn.textContent = `Allow (${rem}s hold)`;
-        }
+        el.textContent = `Hold ${rem}s`;
       } else {
-        needsReRender = true;
+        el.style.display = 'none';
       }
     });
     if (needsReRender) {
@@ -701,43 +694,35 @@ function showNotificationPopup(notification) {
           modal.classList.add('hidden');
           loadDashboard();
         };
-      } else if (holdRemaining > 0) {
-        // MANDATORY QUARANTINE HOLD (Minimum 45s before owner can approve)
-        if (holdEl) {
-          holdEl.textContent = `${holdRemaining}s left (mandatory evaluation hold)`;
-          holdEl.style.color = '#b45309';
-        }
-        if (allowBtn) {
-          allowBtn.disabled = true;
-          allowBtn.style.opacity = '0.55';
-          allowBtn.style.cursor = 'not-allowed';
-          allowBtn.textContent = `Allow Access (${holdRemaining}s hold)`;
-          allowBtn.style.background = '#475569';
-          allowBtn.title = `Owner cannot approve before 45s quarantine hold. Unlocks in ${holdRemaining}s.`;
-        }
-        if (timeoutEl) {
-          const mins = Math.floor(timeoutRemaining / 60);
-          const secs = String(timeoutRemaining % 60).padStart(2, '0');
-          timeoutEl.textContent = `${mins}m ${secs}s`;
-        }
       } else {
-        // 45 seconds passed! Owner can approve
-        if (holdEl) {
-          holdEl.textContent = 'Passed (Ready to unlock WAN)';
-          holdEl.style.color = '#166534';
-        }
+        // Allow button is visible and active to owner from start till end (up to 5 minutes)
         if (allowBtn) {
           allowBtn.disabled = false;
           allowBtn.style.opacity = '1';
           allowBtn.style.cursor = 'pointer';
           allowBtn.textContent = 'Allow Access';
           allowBtn.style.background = '#166534';
+          allowBtn.style.color = '#ffffff';
           allowBtn.title = 'Approve connection and grant internet access';
         }
+
+        if (holdRemaining > 0) {
+          if (holdEl) {
+            holdEl.textContent = `${holdRemaining}s evaluation hold (Click Allow to approve now)`;
+            holdEl.style.color = '#0284c7';
+          }
+        } else {
+          if (holdEl) {
+            holdEl.textContent = 'Evaluation hold complete (Ready to approve)';
+            holdEl.style.color = '#166534';
+          }
+        }
+
         if (timeoutEl) {
           const mins = Math.floor(timeoutRemaining / 60);
           const secs = String(timeoutRemaining % 60).padStart(2, '0');
           timeoutEl.textContent = `${mins}m ${secs}s`;
+          timeoutEl.style.color = timeoutRemaining < 60 ? '#b91c1c' : '#334155';
         }
       }
     }

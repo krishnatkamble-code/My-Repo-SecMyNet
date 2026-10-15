@@ -117,7 +117,7 @@ test('Quarantine-first lifecycle and timing test', async (t) => {
   const waitBody = await waitRes.json();
   assert.equal(waitBody.status, 'quarantine_wait');
 
-  // 7. Test 'allow' action while mandatory 45s hold is still active -> should be placed in approved_holding
+  // 7. Test 'allow' action -> Owner clicks Allow button, client is released immediately
   const allowRes = await fetch(`${baseUrl}/api/notifications/${qNotif.id}/respond`, {
     method: 'POST',
     headers: {
@@ -128,11 +128,39 @@ test('Quarantine-first lifecycle and timing test', async (t) => {
   });
   assert.equal(allowRes.status, 200);
   const allowBody = await allowRes.json();
-  assert.equal(allowBody.status, 'approved_holding');
-  assert.ok(allowBody.holdingRemainingSeconds > 0);
+  assert.equal(allowBody.status, 'allowed');
 
-  // 8. Test 'deny' / 'disallow' action -> should deny and queue disconnect + block
-  const denyRes = await fetch(`${baseUrl}/api/notifications/${qNotif.id}/respond`, {
+  // Verify router received allow command
+  const allowCmdsRes = await fetch(`${baseUrl}/api/openwrt/routers/${routerId}/commands`, {
+    headers: { 'X-SecMyNet-Agent-Token': agentToken }
+  });
+  const { commands: allowCmds } = await allowCmdsRes.json();
+  const allowCmd = allowCmds.find((c) => c.command_type === 'allow' && c.payload.mac === testMac);
+  assert.ok(allowCmd, 'Router should receive allow command on owner approval');
+
+  // 8. Test 'deny' / 'disallow' action on a quarantined client -> should deny and queue disconnect + block
+  const denyMac = '02:00:00:11:22:88';
+  await fetch(`${baseUrl}/api/openwrt/routers/${routerId}/telemetry`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-SecMyNet-Agent-Token': agentToken
+    },
+    body: JSON.stringify({
+      clients: [{ mac: denyMac, ip: '192.168.1.188', rx_bytes: 100, tx_bytes: 100 }],
+      usage: []
+    })
+  });
+  await new Promise((r) => setTimeout(r, 600));
+
+  const denyNotifRes = await fetch(`${baseUrl}/api/notifications`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  const { notifications: denyNotifs } = await denyNotifRes.json();
+  const denyNotif = denyNotifs.find((n) => n.message && n.message.includes(denyMac));
+  assert.ok(denyNotif);
+
+  const denyRes = await fetch(`${baseUrl}/api/notifications/${denyNotif.id}/respond`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -149,8 +177,8 @@ test('Quarantine-first lifecycle and timing test', async (t) => {
     headers: { 'X-SecMyNet-Agent-Token': agentToken }
   });
   const { commands: finalCmds } = await finalCmdsRes.json();
-  const discCmd = finalCmds.find((c) => c.command_type === 'disconnect' && c.payload.mac === testMac);
-  const blkCmd = finalCmds.find((c) => c.command_type === 'block' && c.payload.mac === testMac);
+  const discCmd = finalCmds.find((c) => c.command_type === 'disconnect' && c.payload.mac === denyMac);
+  const blkCmd = finalCmds.find((c) => c.command_type === 'block' && c.payload.mac === denyMac);
   assert.ok(discCmd, 'Router should receive disconnect command');
   assert.ok(blkCmd, 'Router should receive block command');
 });

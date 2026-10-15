@@ -1549,31 +1549,8 @@ app.post('/api/notifications/:notificationId/respond', authRequired, adminRequir
     }
 
     if (allow || action === 'allow') {
-      const minHoldTime = notification.min_quarantine_until ? new Date(notification.min_quarantine_until).getTime() : 0;
-      const nowTime = Date.now();
-      const remainingMs = minHoldTime - nowTime;
-
-      if (remainingMs > 0) {
-        const remainingSec = Math.ceil(remainingMs / 1000);
-        await run("UPDATE notifications SET status = 'approved_holding' WHERE id = $1", [notification.id]);
-        const holdTimer = setTimeout(async () => {
-          try {
-            await releaseQuarantinedDevice(notification.id);
-          } catch (e) {
-            console.error('Failed to release device after 45s hold', e);
-          }
-        }, remainingMs);
-        if (holdTimer && typeof holdTimer.unref === 'function') holdTimer.unref();
-
-        return res.json({
-          message: `Approved by owner! Security policy requires a minimum 45s quarantine hold. Client will be released in ${remainingSec}s.`,
-          status: 'approved_holding',
-          holdingRemainingSeconds: remainingSec
-        });
-      } else {
-        await releaseQuarantinedDevice(notification.id);
-        return res.json({ message: 'User approved and connected. Quarantine released.', status: 'allowed' });
-      }
+      await releaseQuarantinedDevice(notification.id);
+      return res.json({ message: 'User approved and connected. Quarantine released.', status: 'allowed' });
     }
 
     // action is deny / disallow
