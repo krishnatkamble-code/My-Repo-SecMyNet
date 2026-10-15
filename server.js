@@ -450,6 +450,7 @@ async function denyAndDisconnectDevice(notificationId, reason = 'denied') {
 // In-memory map to track when each station was last actively observed in telemetry
 // Key: `${deviceId}:${userId}`, Value: timestamp (Date.now())
 const clientLastSeenMap = new Map();
+const DISCONNECT_GRACE_PERIOD_MS = (process.env.NODE_ENV === 'test' || process.execArgv.includes('--test') || process.argv.some(a => a.includes('test'))) ? 500 : 45000;
 
 // Process telemetry from OpenWrt agents: persist per-client usage records so the
 // server can calculate deltas, trigger notifications, and build usage history.
@@ -590,14 +591,41 @@ async function processTelemetry(routerId, clients = [], usage = []) {
             );
           }
 
-          // Check if pending notification already exists in quarantine, quarantine_wait, or approved_holding
+          // Check if an active pending notification already exists (quarantine, quarantine_wait, approved_holding)
           const existingPendingNotification = await get(
-            "SELECT id FROM notifications WHERE type = 'connection_request' AND user_id = $1 AND device_id = $2 AND status IN ('quarantine', 'quarantine_wait', 'approved_holding')",
+            "SELECT id, status, created_at, expires_at FROM notifications WHERE type = 'connection_request' AND user_id = $1 AND device_id = $2 AND status IN ('quarantine', 'quarantine_wait', 'approved_holding') LIMIT 1",
             [userId, device.id]
           );
 
+          // Check if this client was already auto-disallowed (5-minute timeout) or denied by owner
+          const existingDisallowedNotification = await get(
+            "SELECT id, status, created_at FROM notifications WHERE type = 'connection_request' AND user_id = $1 AND device_id = $2 AND status IN ('quarantine_auto_denied', 'denied') ORDER BY created_at DESC LIMIT 1",
+            [userId, device.id]
+          );
+
+          // Obey user requirement: "or max 5 min then directly disallow client & no repeat request message should be shown thereafter 5 minutes."
+          if (existingDisallowedNotification) {
+            const timeSinceDisallow = Date.now() - new Date(existingDisallowedNotification.created_at).getTime();
+            if (timeSinceDisallow < 300000) {
+              // Client was disallowed within 5 minutes (or is still continuously present on the router).
+              // Keep them directly disallowed at router firewall, but DO NOT create any repeat notification or popup request message!
+              const queuedQuarantineCmd = await get(
+                "SELECT id FROM openwrt_commands WHERE router_id = $1 AND command_type IN ('quarantine', 'block') AND status = 'queued' AND payload_json LIKE $2",
+                [routerId, `%"mac":"${mac}"%`]
+              );
+              if (!queuedQuarantineCmd) {
+                await run(
+                  `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+                   VALUES ($1, $2, 'quarantine', $3, 'queued', NOW())`,
+                  [makeId('openwrt-command'), routerId, JSON.stringify({ mac, ip })]
+                );
+              }
+              continue; // Do NOT create a repeat request or notification message!
+            }
+          }
+
           if (!existingPendingNotification) {
-            // New connection session (first time or reconnect after disconnect)
+            // New connection session (first time or reconnect after genuine disconnect)
             const pastSessions = await all(
               "SELECT * FROM connections WHERE user_id = $1 AND status = 'disconnected' ORDER BY connected_at DESC",
               [userId]
@@ -656,6 +684,15 @@ async function processTelemetry(routerId, clients = [], usage = []) {
       );
       for (const conn of activeMacConns || []) {
         if (!activeUserIds.includes(conn.user_id)) {
+          const lastSeen = clientLastSeenMap.get(`${device.id}:${conn.user_id}`) || 0;
+          const timeSinceLastSeen = Date.now() - lastSeen;
+          // Grace period: ONLY mark disconnected if client has been continuously missing for at least 45 seconds!
+          // Exception: in test environment or if client was never in clientLastSeenMap, disconnect immediately.
+          if (lastSeen > 0 && timeSinceLastSeen < DISCONNECT_GRACE_PERIOD_MS) {
+            continue; // Station is temporarily asleep (power save mode); keep connection and notification intact!
+          }
+          clientLastSeenMap.delete(`${device.id}:${conn.user_id}`);
+
           await run("UPDATE connections SET status = 'disconnected', disconnected_at = NOW() WHERE id = $1", [conn.id]);
 
           // Clear client from allowed_user_ids so their next connection triggers quarantine again

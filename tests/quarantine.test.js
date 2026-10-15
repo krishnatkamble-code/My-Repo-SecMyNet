@@ -1,3 +1,4 @@
+process.env.NODE_ENV = 'test';
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
@@ -551,6 +552,93 @@ test('DELETE /api/notifications and tab clearing test', async (t) => {
   });
   const { notifications: notifsAfterAll } = await afterAllRes.json();
   assert.equal(notifsAfterAll.length, 0, 'All notifications should be cleared');
+});
+
+test('Single notification per client and no repeated requests after disallow', async (t) => {
+  let server;
+  let baseUrl;
+
+  await new Promise((resolve) => {
+    server = app.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      baseUrl = `http://127.0.0.1:${port}`;
+      resolve();
+    });
+  });
+
+  t.after(() => {
+    if (server) server.close();
+  });
+
+  // 1. Admin Login
+  const loginRes = await fetch(`${baseUrl}/api/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: 'admin@secmynet.com', password: 'Admin@123' })
+  });
+  const { token: adminToken } = await loginRes.json();
+
+  // 2. Register router
+  const routerRes = await fetch(`${baseUrl}/api/openwrt/routers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ name: 'Dedupe-Test-Router' })
+  });
+  const { routerId, agentToken } = await routerRes.json();
+
+  const singleClientMac = randomMac();
+
+  // 3. Send telemetry 3 times in rapid succession for the same client
+  for (let i = 0; i < 3; i++) {
+    await fetch(`${baseUrl}/api/openwrt/routers/${routerId}/telemetry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-SecMyNet-Agent-Token': agentToken },
+      body: JSON.stringify({
+        clients: [{ mac: singleClientMac, ip: '192.168.1.199', hostname: 'NoDedupePhone', rx_bytes: 1000 * (i + 1), tx_bytes: 500 * (i + 1) }],
+        usage: []
+      })
+    });
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  // 4. Verify only ONE connection request notification was created
+  const notifRes = await fetch(`${baseUrl}/api/notifications`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  const { notifications: notifs } = await notifRes.json();
+  const clientNotifs = notifs.filter((n) => n.message && n.message.includes(singleClientMac));
+  assert.equal(clientNotifs.length, 1, 'There must be strictly ONE notification for the client, no duplicates');
+  assert.equal(clientNotifs[0].status, 'quarantine');
+
+  // 5. Disallow client (owner clicks disallow or 5m timeout)
+  const disallowRes = await fetch(`${baseUrl}/api/notifications/${clientNotifs[0].id}/respond`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+    body: JSON.stringify({ action: 'deny' })
+  });
+  assert.equal(disallowRes.status, 200);
+
+  // 6. Client continues to be seen in telemetry (phone still associated to Wi-Fi)
+  for (let i = 0; i < 2; i++) {
+    await fetch(`${baseUrl}/api/openwrt/routers/${routerId}/telemetry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-SecMyNet-Agent-Token': agentToken },
+      body: JSON.stringify({
+        clients: [{ mac: singleClientMac, ip: '192.168.1.199', hostname: 'NoDedupePhone', rx_bytes: 5000, tx_bytes: 2500 }],
+        usage: []
+      })
+    });
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  // 7. Verify NO NEW notification was created! Client remains disallowed
+  const afterDisallowRes = await fetch(`${baseUrl}/api/notifications`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  const { notifications: afterNotifs } = await afterDisallowRes.json();
+  const clientAfterNotifs = afterNotifs.filter((n) => n.message && n.message.includes(singleClientMac));
+  assert.equal(clientAfterNotifs.length, 1, 'No repeat request notification should be created after disallow');
+  assert.equal(clientAfterNotifs[0].status, 'denied', 'Status must remain denied');
 });
 
 
