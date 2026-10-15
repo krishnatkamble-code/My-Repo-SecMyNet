@@ -3,6 +3,9 @@ const assert = require('node:assert/strict');
 const http = require('node:http');
 const app = require('../server');
 
+const randomMac = () => '02:' + Array.from({ length: 5 }, () => Math.floor(Math.random() * 256).toString(16).padStart(2, '0')).join(':');
+
+
 test('Quarantine-first lifecycle and timing test', async (t) => {
   let server;
   let baseUrl;
@@ -44,8 +47,7 @@ test('Quarantine-first lifecycle and timing test', async (t) => {
   assert.ok(agentToken);
 
   // 3. Post telemetry with a brand new, unapproved client
-  const rand1 = Math.floor(Math.random() * 89 + 10).toString();
-  const testMac = `02:00:00:11:22:${rand1}`;
+  const testMac = randomMac();
   const telemetryRes = await fetch(`${baseUrl}/api/openwrt/routers/${routerId}/telemetry`, {
     method: 'POST',
     headers: {
@@ -139,7 +141,7 @@ test('Quarantine-first lifecycle and timing test', async (t) => {
   assert.ok(allowCmd, 'Router should receive allow command on owner approval');
 
   // 8. Test 'deny' / 'disallow' action on a quarantined client -> should deny and queue disconnect + block
-  const denyMac = '02:00:00:11:22:88';
+  const denyMac = randomMac();
   await fetch(`${baseUrl}/api/openwrt/routers/${routerId}/telemetry`, {
     method: 'POST',
     headers: {
@@ -243,8 +245,7 @@ test('Returning user re-quarantine and connection history retention', async (t) 
   });
   const { routerId, agentToken } = await routerRes.json();
 
-  const rand2 = Math.floor(Math.random() * 89 + 10).toString();
-  const clientMac = `02:00:00:aa:bb:${rand2}`;
+  const clientMac = randomMac();
   const clientHostname = 'Returning-Phone';
 
   // 3. First connection: brand new device
@@ -355,7 +356,7 @@ test('Quarantine 5-minute timeout auto-disallow and expiration rejection', async
   });
   const { routerId, agentToken } = await routerRes.json();
 
-  const timeoutMac = `02:00:00:99:88:${Math.floor(Math.random() * 89 + 10)}`;
+  const timeoutMac = randomMac();
 
   // Post telemetry
   await fetch(`${baseUrl}/api/openwrt/routers/${routerId}/telemetry`, {
@@ -444,7 +445,7 @@ test('Client quarantine status endpoint and captive holding notification page', 
   });
   const { routerId, agentToken } = await routerRes.json();
 
-  const clientMac = `02:00:00:cc:dd:${Math.floor(Math.random() * 89 + 10)}`;
+  const clientMac = randomMac();
 
   // 3. Post telemetry for new client
   await fetch(`${baseUrl}/api/openwrt/routers/${routerId}/telemetry`, {

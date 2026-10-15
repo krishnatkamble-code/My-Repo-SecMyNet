@@ -1539,8 +1539,23 @@ app.post('/api/notifications/:notificationId/respond', authRequired, adminRequir
     return res.json({ message: 'Device re-approved and connected. Quarantine released.', status: 'allowed' });
   }
 
+  // Idempotent approval if already allowed
+  if (notification.status === 'allowed' && (allow || action === 'allow')) {
+    return res.json({ message: 'Device is already approved and active on the network.', status: 'allowed' });
+  }
+
   if (!['unread', 'quarantine', 'quarantine_wait', 'approved_holding'].includes(notification.status)) {
-    return res.status(400).json({ message: 'Connection request is no longer pending.' });
+    let msg = 'Connection request is no longer pending.';
+    if (notification.status === 'allowed') {
+      msg = 'This connection request was already approved and is active.';
+    } else if (notification.status === 'disconnected') {
+      msg = 'The client disconnected from the Wi-Fi network before approval.';
+    } else if (notification.status === 'quarantine_auto_denied') {
+      msg = 'This request timed out after 5 minutes and was automatically disallowed.';
+    } else if (notification.status === 'denied') {
+      msg = 'This connection request was already disallowed.';
+    }
+    return res.status(400).json({ message: msg, status: notification.status });
   }
 
   if (notification.type === 'connection_request') {
