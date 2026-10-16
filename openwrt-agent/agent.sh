@@ -72,8 +72,8 @@ init_firewall() {
     # NAT Prerouting: Redirect HTTP port 80 to captive portal on 8080
     nft add chain inet secmynet prerouting_nat '{ type nat hook prerouting priority -100; policy accept; }' 2>/dev/null || true
     nft flush chain inet secmynet prerouting_nat 2>/dev/null || true
-    nft add rule inet secmynet prerouting_nat ether saddr @quarantined_macs tcp dport 80 redirect to 8080 2>/dev/null || true
-    nft add rule inet secmynet prerouting_nat ip saddr @quarantined_ips tcp dport 80 redirect to 8080 2>/dev/null || true
+    nft add rule inet secmynet prerouting_nat ip daddr != 192.168.1.1 ether saddr @quarantined_macs tcp dport 80 redirect to 8080 2>/dev/null || true
+    nft add rule inet secmynet prerouting_nat ip daddr != 192.168.1.1 ip saddr @quarantined_ips tcp dport 80 redirect to 8080 2>/dev/null || true
 
     # Ingress Filter: Priority -150 (drops quarantined traffic before conntrack can accept it)
     nft add chain inet secmynet prerouting_filter '{ type filter hook prerouting priority -150; policy accept; }' 2>/dev/null || true
@@ -206,8 +206,8 @@ apply_quarantine() {
   if command -v nft >/dev/null 2>&1; then
     nft insert rule inet fw4 forward ether saddr "$mac" counter drop 2>/dev/null || true
     [ -n "$ip" ] && nft insert rule inet fw4 forward ip saddr "$ip" counter drop 2>/dev/null || true
-    nft insert rule inet fw4 dstnat ether saddr "$mac" tcp dport 80 redirect to 8080 2>/dev/null || true
-    [ -n "$ip" ] && nft insert rule inet fw4 dstnat ip saddr "$ip" tcp dport 80 redirect to 8080 2>/dev/null || true
+    nft insert rule inet fw4 dstnat ip daddr != 192.168.1.1 ether saddr "$mac" tcp dport 80 redirect to 8080 2>/dev/null || true
+    [ -n "$ip" ] && nft insert rule inet fw4 dstnat ip daddr != 192.168.1.1 ip saddr "$ip" tcp dport 80 redirect to 8080 2>/dev/null || true
 
     # Layer 2 Bridge table (OpenWrt L2 filter)
     nft add table bridge secmynet_br 2>/dev/null || true

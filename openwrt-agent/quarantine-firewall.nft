@@ -24,9 +24,9 @@ table inet secmynet {
 
     chain prerouting_nat {
         type nat hook prerouting priority -100; policy accept;
-        # Redirect HTTP port 80 to router port 8080 for captive portal holding page
-        ether saddr @quarantined_macs tcp dport 80 redirect to 8080
-        ip saddr @quarantined_ips tcp dport 80 redirect to 8080
+        # Redirect external HTTP port 80 to router port 8080 for captive portal holding page (exclude router LuCI IP 192.168.1.1!)
+        ip daddr != 192.168.1.1 ether saddr @quarantined_macs tcp dport 80 redirect to 8080
+        ip daddr != 192.168.1.1 ip saddr @quarantined_ips tcp dport 80 redirect to 8080
     }
 
     chain prerouting_filter {

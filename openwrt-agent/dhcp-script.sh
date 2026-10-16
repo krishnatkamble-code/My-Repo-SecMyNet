@@ -73,9 +73,9 @@ if command -v nft >/dev/null 2>&1; then
   nft insert rule inet fw4 forward ether saddr "$MAC" counter drop 2>/dev/null || true
   [ -n "$IP" ] && nft insert rule inet fw4 forward ip saddr "$IP" counter drop 2>/dev/null || true
   [ -n "$IP" ] && nft insert rule inet fw4 srcnat ip saddr "$IP" counter drop 2>/dev/null || true
-  # Captive portal redirection
-  nft insert rule inet fw4 dstnat ether saddr "$MAC" tcp dport 80 redirect to 8080 2>/dev/null || true
-  [ -n "$IP" ] && nft insert rule inet fw4 dstnat ip saddr "$IP" tcp dport 80 redirect to 8080 2>/dev/null || true
+  # Captive portal redirection (exclude the router management IP 192.168.1.1 itself!)
+  nft insert rule inet fw4 dstnat ip daddr != 192.168.1.1 ether saddr "$MAC" tcp dport 80 redirect to 8080 2>/dev/null || true
+  [ -n "$IP" ] && nft insert rule inet fw4 dstnat ip daddr != 192.168.1.1 ip saddr "$IP" tcp dport 80 redirect to 8080 2>/dev/null || true
 
   # Standalone secmynet table sets
   nft add element inet secmynet quarantined_macs "{ $MAC }" 2>/dev/null || true
@@ -95,8 +95,8 @@ if command -v iptables >/dev/null 2>&1; then
   [ -n "$IP" ] && iptables -I FORWARD 1 -s "$IP" -j DROP 2>/dev/null || true
   iptables -t mangle -I PREROUTING 1 -m mac --mac-source "$MAC" -j DROP 2>/dev/null || true
   [ -n "$IP" ] && iptables -t mangle -I PREROUTING 1 -s "$IP" -j DROP 2>/dev/null || true
-  iptables -t nat -I PREROUTING 1 -m mac --mac-source "$MAC" -p tcp --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || true
-  [ -n "$IP" ] && iptables -t nat -I PREROUTING 1 -s "$IP" -p tcp --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || true
+  iptables -t nat -I PREROUTING 1 -m mac --mac-source "$MAC" ! -d 192.168.1.1 -p tcp --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || true
+  [ -n "$IP" ] && iptables -t nat -I PREROUTING 1 -s "$IP" ! -d 192.168.1.1 -p tcp --dport 80 -j REDIRECT --to-ports 8080 2>/dev/null || true
 fi
 if command -v ip6tables >/dev/null 2>&1; then
   ip6tables -I FORWARD 1 -m mac --mac-source "$MAC" -j DROP 2>/dev/null || true
