@@ -168,6 +168,15 @@ apply_quarantine() {
     [ -z "$ip" ] && ip=$(ip -4 neigh show 2>/dev/null | grep -i "$mac" | awk '{print $1}' | head -n1)
   fi
 
+  # NEVER quarantine SecMyNet server or management PC or router!
+  if [ "$ip" = "192.168.1.144" ] || [ "$ip" = "192.168.1.1" ] || [ "$ip" = "127.0.0.1" ]; then
+    log "Skipping quarantine for management/server host: $mac ($ip)"
+    return
+  fi
+  if grep -qi "$mac" /etc/secmynet-agent/whitelisted_macs 2>/dev/null; then
+    return
+  fi
+
   mkdir -p /etc/secmynet-agent
   grep -qi "$mac" /etc/secmynet-agent/quarantined_macs 2>/dev/null || echo "$mac" >> /etc/secmynet-agent/quarantined_macs
   sed -i "/$mac/d" /etc/secmynet-agent/allowed_macs 2>/dev/null || true
@@ -378,6 +387,10 @@ collect_clients() {
   if [ -f /tmp/dhcp.leases ]; then
     while read -r l_ts l_mac l_ip l_host rest; do
       [ -z "$l_mac" ] && continue
+      [ "$l_ip" = "192.168.1.144" ] || [ "$l_ip" = "192.168.1.1" ] && continue
+      case "$(printf '%s' "$l_host" | tr '[:upper:]' '[:lower:]')" in
+        *nhitm*|*admin*|*server*) continue ;;
+      esac
       case "$seen_macs" in
         *" $l_mac "*) continue ;;
       esac

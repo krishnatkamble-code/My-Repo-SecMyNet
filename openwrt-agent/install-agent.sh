@@ -38,30 +38,49 @@ INTERVAL=3
 EOF
 chmod 600 /etc/secmynet-agent.conf
 
+download_file() {
+  url="$1"
+  dest="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -s "$url" -o "$dest"
+  elif command -v uclient-fetch >/dev/null 2>&1; then
+    uclient-fetch -q "$url" -O "$dest"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$url" -O "$dest"
+  fi
+}
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# 3. Copy agent and assets
+# 3. Copy or download agent and assets
 if [ -f "$DIR/agent.sh" ]; then
   cp -f "$DIR/agent.sh" /etc/secmynet-agent/agent.sh
-  chmod +x /etc/secmynet-agent/agent.sh
-  ln -sf /etc/secmynet-agent/agent.sh /usr/bin/secmynet-agent
+else
+  download_file "$SERVER_URL/openwrt-agent/agent.sh" /etc/secmynet-agent/agent.sh
 fi
+chmod +x /etc/secmynet-agent/agent.sh
+ln -sf /etc/secmynet-agent/agent.sh /usr/bin/secmynet-agent
 
 if [ -f "$DIR/dhcp-script.sh" ]; then
   cp -f "$DIR/dhcp-script.sh" /etc/secmynet-agent/dhcp-script.sh
-  chmod +x /etc/secmynet-agent/dhcp-script.sh
-  cp -f "$DIR/dhcp-script.sh" /etc/hotplug.d/dhcp/99-secmynet
-  chmod +x /etc/hotplug.d/dhcp/99-secmynet
+else
+  download_file "$SERVER_URL/openwrt-agent/dhcp-script.sh" /etc/secmynet-agent/dhcp-script.sh
 fi
+chmod +x /etc/secmynet-agent/dhcp-script.sh
+cp -f /etc/secmynet-agent/dhcp-script.sh /etc/hotplug.d/dhcp/99-secmynet 2>/dev/null || true
 
 if [ -f "$DIR/holding.html" ]; then
   cp -f "$DIR/holding.html" /etc/secmynet-agent/holding.html
-  cp -f "$DIR/holding.html" /www/secmynet/holding.html
-  cp -f "$DIR/holding.html" /www/holding.html
+else
+  download_file "$SERVER_URL/openwrt-agent/holding.html" /etc/secmynet-agent/holding.html
 fi
+cp -f /etc/secmynet-agent/holding.html /www/secmynet/holding.html 2>/dev/null || true
+cp -f /etc/secmynet-agent/holding.html /www/holding.html 2>/dev/null || true
 
 if [ -f "$DIR/quarantine-firewall.nft" ]; then
   cp -f "$DIR/quarantine-firewall.nft" /etc/nftables.d/secmynet-quarantine.nft 2>/dev/null || true
+else
+  download_file "$SERVER_URL/openwrt-agent/quarantine-firewall.nft" /etc/nftables.d/secmynet-quarantine.nft 2>/dev/null || true
 fi
 
 # 4. Configure OpenWrt dnsmasq to trigger instant quarantine on every DHCP lease

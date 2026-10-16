@@ -169,6 +169,118 @@ app.use(morgan('tiny'));
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'static')));
+app.use('/openwrt-agent', express.static(path.join(__dirname, 'openwrt-agent')));
+
+app.get('/install.sh', (req, res) => {
+  const host = req.get('host') || '192.168.1.144:3000';
+  const serverUrl = `${req.protocol}://${host}`;
+  const script = `#!/bin/sh
+set -e
+echo "=== SecMyNet OpenWrt Agent One-Step Installer ==="
+SERVER_URL="${serverUrl}"
+ROUTER_ID="558971"
+TOKEN="pw9SafCxXCaLWQgIJA5NfIV2e4gORb3PWZgTV3i-ojI"
+
+mkdir -p /etc/secmynet-agent
+mkdir -p /etc/hotplug.d/dhcp
+mkdir -p /etc/nftables.d 2>/dev/null || true
+mkdir -p /www/secmynet
+mkdir -p /var/log
+
+cat << 'EOF_CONF' > /etc/secmynet-agent.conf
+SERVER_URL="${serverUrl}"
+ROUTER_ID="558971"
+TOKEN="pw9SafCxXCaLWQgIJA5NfIV2e4gORb3PWZgTV3i-ojI"
+INTERVAL=3
+EOF_CONF
+chmod 600 /etc/secmynet-agent.conf
+
+download_file() {
+  url="$1"
+  dest="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -s "$url" -o "$dest"
+  elif command -v uclient-fetch >/dev/null 2>&1; then
+    uclient-fetch -q "$url" -O "$dest"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$url" -O "$dest"
+  fi
+}
+
+echo "Downloading SecMyNet agent components from $SERVER_URL/openwrt-agent/..."
+download_file "$SERVER_URL/openwrt-agent/agent.sh" "/etc/secmynet-agent/agent.sh"
+chmod +x /etc/secmynet-agent/agent.sh
+ln -sf /etc/secmynet-agent/agent.sh /usr/bin/secmynet-agent
+
+download_file "$SERVER_URL/openwrt-agent/dhcp-script.sh" "/etc/secmynet-agent/dhcp-script.sh"
+chmod +x /etc/secmynet-agent/dhcp-script.sh
+cp -f /etc/secmynet-agent/dhcp-script.sh /etc/hotplug.d/dhcp/99-secmynet 2>/dev/null || true
+
+download_file "$SERVER_URL/openwrt-agent/holding.html" "/etc/secmynet-agent/holding.html"
+cp -f /etc/secmynet-agent/holding.html /www/secmynet/holding.html 2>/dev/null || true
+cp -f /etc/secmynet-agent/holding.html /www/holding.html 2>/dev/null || true
+
+download_file "$SERVER_URL/openwrt-agent/quarantine-firewall.nft" "/etc/nftables.d/secmynet-quarantine.nft" 2>/dev/null || true
+
+if command -v uci >/dev/null 2>&1 && [ -f /etc/config/dhcp ]; then
+  uci set dhcp.@dnsmasq[0].dhcpscript='/etc/secmynet-agent/dhcp-script.sh'
+  uci commit dhcp 2>/dev/null || true
+  /etc/init.d/dnsmasq restart 2>/dev/null || true
+  echo "✔ Configured dnsmasq dhcpscript for instant zero-latency quarantine"
+fi
+
+if command -v uci >/dev/null 2>&1 && [ -f /etc/config/uhttpd ]; then
+  if ! uci get uhttpd.secmynet >/dev/null 2>&1; then
+    uci set uhttpd.secmynet=uhttpd
+    uci add_list uhttpd.secmynet.listen_http='0.0.0.0:8080'
+    uci set uhttpd.secmynet.home='/www/secmynet'
+    uci set uhttpd.secmynet.index_page='holding.html'
+    uci set uhttpd.secmynet.error_page='/holding.html'
+    uci commit uhttpd 2>/dev/null || true
+    /etc/init.d/uhttpd restart 2>/dev/null || true
+  fi
+fi
+
+mkdir -p /etc/secmynet-agent
+touch /etc/secmynet-agent/allowed_macs
+touch /etc/secmynet-agent/whitelisted_macs
+echo "192.168.1.144" > /etc/secmynet-agent/whitelisted_ips
+echo "192.168.1.1" >> /etc/secmynet-agent/whitelisted_ips
+admin_mac=$(awk '/192.168.1.144/ {print $4}' /proc/net/arp 2>/dev/null | head -n1)
+if [ -n "$admin_mac" ]; then
+  echo "$admin_mac" >> /etc/secmynet-agent/whitelisted_macs
+  echo "$admin_mac" >> /etc/secmynet-agent/allowed_macs
+fi
+/bin/sh /etc/secmynet-agent/agent.sh --init
+/etc/init.d/firewall restart 2>/dev/null || true
+
+cat << 'EOF_INIT' > /etc/init.d/secmynet-agent
+#!/bin/sh /etc/rc.common
+USE_PROCD=1
+START=99
+STOP=10
+
+start_service() {
+    procd_open_instance
+    procd_set_param command /bin/sh /etc/secmynet-agent/agent.sh
+    procd_set_param respawn 3600 5 0
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_close_instance
+}
+EOF_INIT
+chmod +x /etc/init.d/secmynet-agent
+/etc/init.d/secmynet-agent enable 2>/dev/null || true
+/etc/init.d/secmynet-agent restart 2>/dev/null || true
+
+/bin/sh /etc/secmynet-agent/agent.sh --once 2>/dev/null || true
+
+echo "✔ SecMyNet OpenWrt Agent is running and enforcing quarantine!"
+`;
+  res.setHeader('Content-Type', 'text/x-shellscript');
+  res.send(script);
+});
+
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 app.use(
   rateLimit({
@@ -467,6 +579,58 @@ const disallowedStationUserIds = new Set();
 const clientLastSeenMap = new Map();
 const DISCONNECT_GRACE_PERIOD_MS = (process.env.NODE_ENV === 'test' || process.execArgv.includes('--test') || process.argv.some(a => a.includes('test'))) ? 500 : 45000;
 
+async function getClientVisitDetails(userId, displayName, mac = '') {
+  const pastSessions = await all(
+    "SELECT * FROM connections WHERE user_id = $1 AND status = 'disconnected' ORDER BY connected_at DESC",
+    [userId]
+  );
+
+  const isReturning = Boolean(pastSessions && pastSessions.length > 0);
+  const visitNumber = isReturning ? pastSessions.length + 1 : 1;
+
+  if (isReturning) {
+    const lastConn = pastSessions[0];
+    const lastConnectedStr = lastConn.connected_at
+      ? new Date(lastConn.connected_at).toLocaleString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        })
+      : 'Unknown';
+
+    let totalLastLoggedTime = 'Less than 1 min';
+    if (lastConn.connected_at && lastConn.disconnected_at) {
+      const durMs = new Date(lastConn.disconnected_at).getTime() - new Date(lastConn.connected_at).getTime();
+      const durMins = Math.max(1, Math.round(durMs / 60000));
+      totalLastLoggedTime = durMins < 60 ? `${durMins} mins` : `${Math.floor(durMins / 60)}h ${durMins % 60}m`;
+    }
+    const lastSessionMb = `${Number(lastConn.data_used_mb || 0).toFixed(2)} MB`;
+    const totalPastMb = `${pastSessions.reduce((sum, c) => sum + Number(c.data_used_mb || 0), 0).toFixed(2)} MB`;
+
+    const message = `Returning user detected: ${displayName} [${mac}] | Client Type: Returning | Device Name: ${displayName} | Visit Number: Visit #${visitNumber} | Last logged: ${lastConnectedStr} | Total Last Logged Time: ${totalLastLoggedTime} | Total Data Used for Last Session: ${lastSessionMb} | Total past usage: ${totalPastMb}`;
+
+    return {
+      clientType: 'Returning',
+      deviceName: displayName,
+      visitNumber: `Visit #${visitNumber}`,
+      lastLoggedTime: lastConnectedStr,
+      totalLastLoggedTime,
+      lastSessionData: lastSessionMb,
+      totalPastMb,
+      message
+    };
+  }
+
+  const message = `New device detected: ${displayName} [${mac}] | Client Type: New | Device Name: ${displayName} | Visit Number: Visit #1`;
+  return {
+    clientType: 'New',
+    deviceName: displayName,
+    visitNumber: 'Visit #1',
+    message
+  };
+}
 
 // Process telemetry from OpenWrt agents: persist per-client usage records so the
 // server can calculate deltas, trigger notifications, and build usage history.
@@ -496,6 +660,12 @@ async function processTelemetry(routerId, clients = [], usage = []) {
       if (!mac) continue;
       const ip = client.ip || client.IP || null;
       const hostname = client.hostname || client.host || null;
+
+      // NEVER quarantine the management host / SecMyNet server machine or router itself
+      if (ip === '192.168.1.144' || ip === '192.168.1.1' || (hostname && hostname.toLowerCase().includes('nhitm'))) {
+        continue;
+      }
+
       const rx = Number(client.rx_bytes || client.rx || 0);
       const tx = Number(client.tx_bytes || client.tx || 0);
       const totalMb = Number(((rx + tx) / (1024 * 1024)).toFixed(2));
@@ -575,6 +745,7 @@ async function processTelemetry(routerId, clients = [], usage = []) {
               await run('UPDATE devices SET allowed_user_ids = $1 WHERE id = $2', [JSON.stringify(updatedAllowed), device.id]);
               device.allowed_user_ids = JSON.stringify(updatedAllowed);
             }
+            await run("UPDATE notifications SET status = 'disconnected' WHERE device_id = $1 AND user_id = $2", [device.id, userId]);
             activeConn = null;
           }
         }
@@ -607,70 +778,87 @@ async function processTelemetry(routerId, clients = [], usage = []) {
             );
           }
 
-          // Check if an active pending notification already exists (quarantine, quarantine_wait, approved_holding)
-          const existingPendingNotification = await get(
-            "SELECT id, status, created_at, expires_at FROM notifications WHERE type = 'connection_request' AND user_id = $1 AND device_id = $2 AND status IN ('quarantine', 'quarantine_wait', 'approved_holding') LIMIT 1",
+          // Obey user requirement 2: "For one client there should only one request which may be present only in one of the four states/categories: Temp Quarantine, Pending, Allowed, Denied but only one at a time. Client should get access only for 'Allowed' state, not any of the other three states."
+          // Obey user requirement 5: "No repeat pop up message should come to app untill the client disconnects from his device and tried connecting again to router."
+          const existingNotification = await get(
+            "SELECT id, status, created_at, expires_at, message FROM notifications WHERE type = 'connection_request' AND user_id = $1 AND device_id = $2 ORDER BY created_at DESC LIMIT 1",
             [userId, device.id]
           );
 
           const clientKey = `${device.id}:${userId}`;
-          // Obey user requirement: "client getting access to internet & repeat reuest is stricly denied till the disconnection and conneccting again to router."
-          if (disallowedStationUserIds.has(clientKey)) {
-            // Client is disallowed and still present on the router. Keep them directly quarantined/blocked at router firewall,
-            // and STRICTLY DO NOT create any repeat notification or popup request message!
-            const queuedQuarantineCmd = await get(
-              "SELECT id FROM openwrt_commands WHERE router_id = $1 AND command_type IN ('quarantine', 'block') AND status = 'queued' AND payload_json LIKE $2",
-              [routerId, `%"mac":"${mac}"%`]
-            );
-            if (!queuedQuarantineCmd) {
-              await run(
-                `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
-                 VALUES ($1, $2, 'quarantine', $3, 'queued', NOW())`,
-                [makeId('openwrt-command'), routerId, JSON.stringify({ mac, ip })]
+
+          if (existingNotification) {
+            // Client is already in one of the 4 states!
+            if (existingNotification.status === 'allowed') {
+              // State 3: Allowed (Internet ON). Handled by activeConn.
+              continue;
+            }
+
+            if (existingNotification.status === 'denied' || existingNotification.status === 'quarantine_auto_denied') {
+              // State 4: Denied. Keep client quarantined/blocked at router firewall, strictly no repeat request!
+              disallowedStationUserIds.add(clientKey);
+              const queuedQuarantineCmd = await get(
+                "SELECT id FROM openwrt_commands WHERE router_id = $1 AND command_type IN ('quarantine', 'block') AND status = 'queued' AND payload_json LIKE $2",
+                [routerId, `%"mac":"${mac}"%`]
               );
-            }
-            continue; // Strictly DENY repeat requests while continuously connected!
-          }
-
-          if (!existingPendingNotification) {
-            // New connection session (first time or reconnect after genuine disconnect)
-            const pastSessions = await all(
-              "SELECT * FROM connections WHERE user_id = $1 AND status = 'disconnected' ORDER BY connected_at DESC",
-              [userId]
-            );
-
-            let notifMessage = '';
-            if (pastSessions && pastSessions.length > 0) {
-              const visitCount = pastSessions.length + 1;
-              const lastConn = pastSessions[0];
-              const lastConnectedStr = lastConn.connected_at ? new Date(lastConn.connected_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Unknown';
-              const lastDisconnectedStr = lastConn.disconnected_at ? new Date(lastConn.disconnected_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : null;
-              const totalPastMb = pastSessions.reduce((sum, c) => sum + Number(c.data_used_mb || 0), 0).toFixed(2);
-              const lastSessionMb = Number(lastConn.data_used_mb || 0).toFixed(2);
-
-              let histDetails = `Visit #${visitCount} · Last logged: ${lastConnectedStr}`;
-              if (lastDisconnectedStr) histDetails += ` (left: ${lastDisconnectedStr})`;
-              histDetails += ` · Last session: ${lastSessionMb} MB · Total past usage: ${totalPastMb} MB across ${pastSessions.length} session${pastSessions.length === 1 ? '' : 's'}`;
-
-              notifMessage = `Returning user detected: ${displayName} [${mac}]. (${histDetails}). Quarantined pending owner approval.`;
-            } else {
-              notifMessage = `New device detected: ${displayName} [${mac}]. Quarantined pending owner approval.`;
+              if (!queuedQuarantineCmd) {
+                await run(
+                  `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+                   VALUES ($1, $2, 'quarantine', $3, 'queued', NOW())`,
+                  [makeId('openwrt-command'), routerId, JSON.stringify({ mac, ip })]
+                );
+              }
+              continue; // Strictly DENY repeat requests while continuously connected!
             }
 
-            // Obey user requirement: "For one client there should only one request which may be present only in one of the four states/catogories"
-            // Clear any stale notification row for this client on this device so there is strictly ONE request per client in DB:
-            await run('DELETE FROM notifications WHERE user_id = $1 AND device_id = $2', [userId, device.id]);
+            if (existingNotification.status === 'quarantine_wait' || existingNotification.status === 'quarantine' || existingNotification.status === 'unread' || existingNotification.status === 'approved_holding') {
+              // State 1 (Temp Quarantine) or State 2 (Pending).
+              // Check 5-minute timeout:
+              if (existingNotification.expires_at && new Date(existingNotification.expires_at).getTime() <= Date.now()) {
+                await denyAndDisconnectDevice(existingNotification.id, 'quarantine_auto_denied');
+              } else {
+                // Ensure router firewall has quarantine command queued if not already queued
+                const queuedQuarantineCmd = await get(
+                  "SELECT id FROM openwrt_commands WHERE router_id = $1 AND command_type = 'quarantine' AND status = 'queued' AND payload_json LIKE $2",
+                  [routerId, `%"mac":"${mac}"%`]
+                );
+                if (!queuedQuarantineCmd) {
+                  await run(
+                    `INSERT INTO openwrt_commands (id, router_id, command_type, payload_json, status, created_at)
+                     VALUES ($1, $2, 'quarantine', $3, 'queued', NOW())`,
+                    [makeId('openwrt-command'), routerId, JSON.stringify({ mac, ip })]
+                  );
+                }
+              }
+              continue; // Keep existing notification in its state, NEVER recreate or repeat!
+            }
 
-            await createNotification({
-              type: 'connection_request',
-              message: notifMessage,
-              userId,
-              deviceId: device.id,
-              locationId: device.location_id,
-              quarantineSeconds: 45,
-              maxQuarantineSeconds: 300
-            });
+            if (existingNotification.status === 'disconnected') {
+              // Client had physically disconnected and is now reconnecting to the router!
+              // Wipe stale disconnected row so we create exactly ONE fresh request in Temp Quarantine
+              await run('DELETE FROM notifications WHERE id = $1', [existingNotification.id]);
+            }
           }
+
+          if (disallowedStationUserIds.has(clientKey)) {
+            continue;
+          }
+
+          // New connection session (first time or reconnect after genuine disconnect)
+          const visitDetails = await getClientVisitDetails(userId, displayName, mac);
+
+          // Clear any old rows for this client on this device so there is strictly ONE request per client in DB:
+          await run('DELETE FROM notifications WHERE user_id = $1 AND device_id = $2', [userId, device.id]);
+
+          await createNotification({
+            type: 'connection_request',
+            message: visitDetails.message,
+            userId,
+            deviceId: device.id,
+            locationId: device.location_id,
+            quarantineSeconds: 45,
+            maxQuarantineSeconds: 300
+          });
 
           // Always instruct router agent to enforce quarantine at firewall level for unapproved client
           const queuedQuarantineCmd = await get(
@@ -716,9 +904,9 @@ async function processTelemetry(routerId, clients = [], usage = []) {
             device.allowed_user_ids = JSON.stringify(updatedAllowed);
           }
 
-          // Mark unapproved pending notifications as disconnected
+          // Mark all notifications for this disconnected client as disconnected
           await run(
-            "UPDATE notifications SET status = 'disconnected' WHERE device_id = $1 AND user_id = $2 AND status IN ('quarantine', 'quarantine_wait', 'approved_holding')",
+            "UPDATE notifications SET status = 'disconnected' WHERE device_id = $1 AND user_id = $2",
             [device.id, conn.user_id]
           );
         }
@@ -1627,8 +1815,8 @@ app.post('/api/notifications/:notificationId/respond', authRequired, adminRequir
     return res.status(404).json({ message: 'Notification not found.' });
   }
 
-  // Allow disconnect on already approved devices (from Approved tab)
-  if (notification.status === 'allowed' && (action === 'disconnect' || action === 'deny')) {
+  // Allow disconnect on already approved or disconnected devices (from Approved tab)
+  if ((notification.status === 'allowed' || notification.status === 'disconnected') && (action === 'disconnect' || action === 'deny')) {
     await denyAndDisconnectDevice(notification.id, 'disconnected');
     return res.json({ message: 'Device disconnected and access revoked.', status: 'disconnected' });
   }

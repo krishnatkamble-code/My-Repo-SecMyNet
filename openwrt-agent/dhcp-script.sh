@@ -21,6 +21,14 @@ if [ "$ACTION" = "del" ]; then
   exit 0
 fi
 
+# 0. NEVER quarantine the SecMyNet server or management PC or router!
+if [ "$IP" = "192.168.1.144" ] || [ "$IP" = "192.168.1.1" ] || [ "$IP" = "127.0.0.1" ]; then
+  exit 0
+fi
+case "$(printf '%s' "$HOST" | tr '[:upper:]' '[:lower:]')" in
+  *nhitm*|*admin*|*server*) exit 0 ;;
+esac
+
 # If client is already approved by owner, allow access
 if grep -qi "$MAC" /etc/secmynet-agent/allowed_macs 2>/dev/null; then
   exit 0
