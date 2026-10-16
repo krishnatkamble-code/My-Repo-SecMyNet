@@ -8,14 +8,14 @@ elif [ -f /etc/secmynet-agent/agent.conf ]; then
   . /etc/secmynet-agent/agent.conf
 fi
 
-SERVER_URL=${SERVER_URL:-${SECMYNET_URL:-https://my-repo-sec-my-net.vercel.app}}
+SERVER_URL=${SERVER_URL:-${SECMYNET_URL:-http://192.168.1.144:3000}}
 SERVER_URL="$(printf '%s' "${SERVER_URL%/}" | tr -d '\r\n ')"
-ROUTER_ID=${ROUTER_ID:-${SECMYNET_ROUTER_ID:-931354}}
+ROUTER_ID=${ROUTER_ID:-${SECMYNET_ROUTER_ID:-558971}}
 ROUTER_ID="$(printf '%s' "$ROUTER_ID" | tr -d '\r\n ')"
 TOKEN_FILE=${TOKEN_FILE:-/etc/secmynet-agent/token}
 STATE_FILE=${STATE_FILE:-/var/run/secmynet-agent/state.json}
 LOG_FILE=${LOG_FILE:-/var/log/secmynet-agent.log}
-INTERVAL=${INTERVAL:-5}
+INTERVAL=${INTERVAL:-3}
 
 log() {
   echo "$(date -u +'%Y-%m-%dT%H:%M:%SZ') $*" >> "$LOG_FILE"
@@ -501,26 +501,68 @@ poll_commands() {
 }
 
 enforce_active_quarantines() {
-  # Continuously ensure every connected station NOT in allowed_macs is strictly quarantined
+  tmp_sta="/tmp/secmynet_stations.$$"
+  rm -f "$tmp_sta"
+  touch "$tmp_sta"
+
+  # 1. From wireless interfaces (iw dev)
   for iface in $(iw dev 2>/dev/null | sed -n 's/.*Interface //p'); do
-    for sta in $(iw dev "$iface" station dump 2>/dev/null | awk '/Station/ {print $2}'); do
-      sta_mac="$(printf '%s' "$sta" | tr '[:upper:]' '[:lower:]')"
-      [ -z "$sta_mac" ] && continue
-      sta_ip=$(grep -i "$sta_mac" /tmp/dhcp.leases 2>/dev/null | cut -d' ' -f3 | head -n1)
-      [ -z "$sta_ip" ] && sta_ip=$(ip -4 neigh show 2>/dev/null | grep -i "$sta_mac" | awk '{print $1}' | head -n1)
-
-      # If station is in blocked_macs, immediately enforce quarantine and deauthenticate
-      if grep -qi "$sta_mac" /etc/secmynet-agent/blocked_macs 2>/dev/null; then
-        apply_quarantine "$sta_mac" "$sta_ip"
-        iw dev "$iface" station del "$sta_mac" 2>/dev/null || hostapd_cli -i "$iface" deauthenticate "$sta_mac" 2>/dev/null || true
-        continue
-      fi
-
-      if ! grep -qi "$sta_mac" /etc/secmynet-agent/allowed_macs 2>/dev/null; then
-        apply_quarantine "$sta_mac" "$sta_ip"
-      fi
-    done
+    iw dev "$iface" station dump 2>/dev/null | awk '/Station/ {print $2}' >> "$tmp_sta"
   done
+
+  # 2. From iwinfo (Broadcom, Atheros, MediaTek, generic OpenWrt)
+  if command -v iwinfo >/dev/null 2>&1; then
+    for iface in $(iwinfo 2>/dev/null | awk '/ESSID/ {print $1}'); do
+      iwinfo "$iface" assoclist 2>/dev/null | awk '/^[0-9a-fA-F:]/ {print $1}' >> "$tmp_sta"
+    done
+  fi
+
+  # 3. From hostapd_cli
+  for ctrl in $(ls -d /var/run/hostapd/* 2>/dev/null); do
+    if [ -S "$ctrl" ]; then
+      hostapd_cli -p /var/run/hostapd -i "$(basename "$ctrl")" all_sta 2>/dev/null | grep -E '^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$' >> "$tmp_sta"
+    fi
+  done
+
+  # 4. From /tmp/dhcp.leases (EVERY LEASED CLIENT, INCLUDING SLEEPING PHONES)
+  if [ -f /tmp/dhcp.leases ]; then
+    awk '{print $2}' /tmp/dhcp.leases 2>/dev/null >> "$tmp_sta"
+  fi
+
+  # 5. From /proc/net/arp (ACTIVE IP/MAC NEIGHBORS)
+  if [ -f /proc/net/arp ]; then
+    awk '$4 != "00:00:00:00:00:00" && $4 ~ /^[0-9a-fA-F:]/ {print $4}' /proc/net/arp 2>/dev/null >> "$tmp_sta"
+  fi
+
+  seen_sta=" "
+  for raw_mac in $(cat "$tmp_sta" 2>/dev/null); do
+    sta_mac="$(printf '%s' "$raw_mac" | tr '[:upper:]' '[:lower:]')"
+    [ -z "$sta_mac" ] && continue
+    case "$seen_sta" in
+      *" $sta_mac "*) continue ;;
+    esac
+    seen_sta="${seen_sta}${sta_mac} "
+
+    sta_ip=$(grep -i "$sta_mac" /tmp/dhcp.leases 2>/dev/null | cut -d' ' -f3 | head -n1)
+    [ -z "$sta_ip" ] && sta_ip=$(awk -v m="$sta_mac" 'tolower($4)==tolower(m) {print $1; exit}' /proc/net/arp 2>/dev/null)
+    [ -z "$sta_ip" ] && sta_ip=$(ip -4 neigh show 2>/dev/null | grep -i "$sta_mac" | awk '{print $1}' | head -n1)
+
+    # If station is in blocked_macs, immediately enforce quarantine and deauthenticate
+    if grep -qi "$sta_mac" /etc/secmynet-agent/blocked_macs 2>/dev/null; then
+      apply_quarantine "$sta_mac" "$sta_ip"
+      for iface in $(iw dev 2>/dev/null | sed -n 's/.*Interface //p'); do
+        iw dev "$iface" station del "$sta_mac" 2>/dev/null || hostapd_cli -i "$iface" deauthenticate "$sta_mac" 2>/dev/null || true
+      done
+      continue
+    fi
+
+    # If station is NOT approved by owner, enforce quarantine!
+    if ! grep -qi "$sta_mac" /etc/secmynet-agent/allowed_macs 2>/dev/null; then
+      apply_quarantine "$sta_mac" "$sta_ip"
+    fi
+  done
+
+  rm -f "$tmp_sta"
 }
 
 main() {
@@ -560,10 +602,19 @@ if [ "$1" = "--once" ]; then
 fi
 
 if [ "$1" = "--event" ]; then
-  # Instant trigger from OpenWrt hotplug (e.g., DHCP lease or hostapd association)
-  log "Hotplug event received: $2 $3 $4"
-  if [ -n "$3" ] && ! grep -qi "$3" /etc/secmynet-agent/allowed_macs 2>/dev/null; then
-    apply_quarantine "$3" "$4"
+  # Instant trigger from OpenWrt dnsmasq or hotplug (e.g., DHCP lease)
+  evt_action="$2"
+  evt_mac="$3"
+  evt_ip="$4"
+  # If called with: --event <MAC> <IP> (without action)
+  if echo "$evt_action" | grep -qE '^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$'; then
+    evt_mac="$2"
+    evt_ip="$3"
+    evt_action="add"
+  fi
+  log "Event received: action=$evt_action mac=$evt_mac ip=$evt_ip"
+  if [ -n "$evt_mac" ] && ! grep -qi "$evt_mac" /etc/secmynet-agent/allowed_macs 2>/dev/null; then
+    apply_quarantine "$evt_mac" "$evt_ip"
   fi
   post_telemetry
   poll_commands

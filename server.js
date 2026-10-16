@@ -614,15 +614,8 @@ async function processTelemetry(routerId, clients = [], usage = []) {
           );
 
           const clientKey = `${device.id}:${userId}`;
-          // Check if this client was already auto-disallowed (5-minute timeout) or denied by owner
-          const existingDisallowedNotification = await get(
-            "SELECT id, status, created_at FROM notifications WHERE type = 'connection_request' AND user_id = $1 AND device_id = $2 AND status IN ('quarantine_auto_denied', 'denied') ORDER BY created_at DESC LIMIT 1",
-            [userId, device.id]
-          );
-
           // Obey user requirement: "client getting access to internet & repeat reuest is stricly denied till the disconnection and conneccting again to router."
-          if (disallowedStationUserIds.has(clientKey) || existingDisallowedNotification) {
-            disallowedStationUserIds.add(clientKey);
+          if (disallowedStationUserIds.has(clientKey)) {
             // Client is disallowed and still present on the router. Keep them directly quarantined/blocked at router firewall,
             // and STRICTLY DO NOT create any repeat notification or popup request message!
             const queuedQuarantineCmd = await get(
