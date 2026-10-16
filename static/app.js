@@ -232,7 +232,7 @@ function renderNotifications() {
     const mins = Math.floor(timeoutRemaining / 60);
     const secs = String(timeoutRemaining % 60).padStart(2, '0');
 
-    const actions = `<button class="action-button" style="background:#166534;color:#fff;font-weight:700;" data-notification-response="${n.id}|allow" title="Turn Internet ON">✅ Allow Access</button><button class="action-button" style="background:#d97706;color:#fff;font-weight:600;" data-notification-response="${n.id}|wait" title="Move to Pending Approvals">⏳ Move to Pending</button><button class="action-button danger" data-notification-response="${n.id}|deny">🚫 Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+    const actions = `<button class="action-button" style="background:#0284c7;color:#fff;font-weight:600;" data-open-popup="${n.id}" title="View Details Popup">📋 View Popup</button><button class="action-button" style="background:#166534;color:#fff;font-weight:700;" data-notification-response="${n.id}|allow" title="Turn Internet ON">✅ Allow Access</button><button class="action-button" style="background:#d97706;color:#fff;font-weight:600;" data-notification-response="${n.id}|wait" title="Move to Pending Approvals">⏳ Move to Pending</button><button class="action-button danger" data-notification-response="${n.id}|deny">🚫 Disallow</button>${n.user_id ? `<button class="action-button" style="background:#475569;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
     return `<tr><td><span class="status-badge quarantine">Temp Quarantine</span></td><td>${formatClientInfoCell(n)}<br><small style="color:#b91c1c;font-weight:700;">🔴 Internet: COMPLETELY OFF</small> · <small style="color:#0284c7;font-weight:700;">⏱️ Review: ${reviewRemaining}s left</small> · <small style="color:#b45309;">⏳ 5m Auto-Disallow: ${mins}m ${secs}s</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
   }).join('');
 
@@ -244,21 +244,21 @@ function renderNotifications() {
 
     let actions = '';
     if (timeoutRemaining === 0) {
-      actions = `<span class="status-badge blocked">Disallowed (5m Timeout)</span>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;margin-left:6px;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+      actions = `<span class="status-badge blocked">Disallowed (5m Timeout)</span>${n.user_id ? `<button class="action-button" style="background:#475569;color:#fff;margin-left:6px;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
     } else {
-      actions = `<button class="action-button" style="background:#166534;color:#fff;font-weight:700;" data-notification-response="${n.id}|allow" title="Turn Internet ON">✅ Allow Access</button><button class="action-button danger" data-notification-response="${n.id}|deny">🚫 Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+      actions = `<button class="action-button" style="background:#0284c7;color:#fff;font-weight:600;" data-open-popup="${n.id}" title="View Details Popup">📋 View Popup</button><button class="action-button" style="background:#166534;color:#fff;font-weight:700;" data-notification-response="${n.id}|allow" title="Turn Internet ON">✅ Allow Access</button><button class="action-button danger" data-notification-response="${n.id}|deny">🚫 Disallow</button>${n.user_id ? `<button class="action-button" style="background:#475569;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
     }
     return `<tr><td><span class="status-badge quarantine_wait" style="background:#ffedd5;color:#c2410c;">Pending</span></td><td>${formatClientInfoCell(n)}<br><small style="color:#b91c1c;font-weight:700;">🔴 Internet: COMPLETELY OFF</small> · <small style="color:#b45309;font-weight:700;">⏳ Auto-disallow in ${mins}m ${secs}s if unapproved</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
   }).join('');
 
   const approvedRows = allowedItems.map((n) => {
-    const actions = `<button class="action-button danger" data-notification-response="${n.id}|disconnect">Disconnect / Revoke Access</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">View History</button>` : ''}<button class="action-button secondary" data-notification-clear="${n.id}">Clear</button>`;
+    const actions = `<button class="action-button" style="background:#0284c7;color:#fff;font-weight:600;" data-open-popup="${n.id}" title="View Details Popup">📋 View Details</button><button class="action-button danger" data-notification-response="${n.id}|disconnect">Disconnect / Revoke Access</button>${n.user_id ? `<button class="action-button" style="background:#475569;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">View History</button>` : ''}<button class="action-button secondary" data-notification-clear="${n.id}">Clear</button>`;
     return `<tr><td><span class="status-badge allowed">Allowed</span></td><td>${formatClientInfoCell(n)}<br><small style="color:#166534;font-weight:700;">🟢 Internet: ON (Approved by Owner)</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
   }).join('');
 
   const disallowedRows = deniedItems.map((n) => {
     const displayStatus = n.status === 'quarantine_auto_denied' ? 'Denied (5m Timeout)' : (n.status === 'denied' ? 'Denied by Owner' : n.status.replace(/_/g, ' '));
-    const actions = `<button class="action-button" style="background:#166534;color:#fff;font-weight:600;" data-notification-response="${n.id}|allow">Re-Allow Access</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">View History</button>` : ''}<button class="action-button secondary" data-notification-clear="${n.id}">Clear</button>`;
+    const actions = `<button class="action-button" style="background:#0284c7;color:#fff;font-weight:600;" data-open-popup="${n.id}" title="View Details Popup">📋 View Details</button><button class="action-button" style="background:#166534;color:#fff;font-weight:600;" data-notification-response="${n.id}|allow">Re-Allow Access</button>${n.user_id ? `<button class="action-button" style="background:#475569;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">View History</button>` : ''}<button class="action-button secondary" data-notification-clear="${n.id}">Clear</button>`;
     return `<tr><td><span class="status-badge blocked">Denied</span></td><td>${formatClientInfoCell(n)}<span class="status-badge blocked" style="margin-left:6px;font-size:0.75rem;">${escapeHtml(displayStatus)}</span><br><small style="color:#b91c1c;font-weight:700;">🔴 Internet: COMPLETELY OFF</small> · <small style="color:#475569;">No repeat popup until client disconnects and reconnects</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
   }).join('');
 
@@ -294,9 +294,15 @@ function renderNotifications() {
       <button class="action-button ${activeTab === 'denied' ? 'active-tab' : ''}" data-notif-tab="denied" style="${activeTab === 'denied' ? 'background:#475569;color:#fff;font-weight:700;border-color:#475569;' : 'background:#fff;color:#334155;'}">
         🚫 4. Denied (${deniedItems.length})
       </button>
-      <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
+      <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <button class="action-button" data-simulate-request="new" style="background:#0284c7;color:#fff;font-weight:600;" title="Simulate a new client connection request to test the popup">
+          🧪 Test New Client Popup
+        </button>
+        <button class="action-button" data-simulate-request="returning" style="background:#7c3aed;color:#fff;font-weight:600;" title="Simulate a returning client connection request to test the popup">
+          🧪 Test Returning Client Popup
+        </button>
         <button class="action-button secondary" data-notification-clear-tab="${activeTab}" style="background:#475569;color:#fff;font-weight:600;" title="Clear notifications in current tab">
-          🧹 Clear Current Tab
+          🧹 Clear Tab
         </button>
         <button class="action-button secondary" data-notification-clear-all="true" style="background:#b91c1c;color:#fff;border-color:#991b1b;font-weight:600;" title="Clear all notifications across all categories">
           🗑️ Clear All
@@ -743,14 +749,12 @@ async function loadNotifications(showPopup = true) {
     $('#notificationCount').textContent = pending.length;
     if (state.page === 'notifications') renderAdmin();
 
-    // Clean up shownPopupClients ONLY for clients that are completely disconnected or removed
-    const activeClientKeys = new Set(
-      state.notifications
-        .filter((n) => ['quarantine', 'quarantine_wait', 'approved_holding', 'allowed', 'denied', 'quarantine_auto_denied'].includes(n.status))
-        .map((n) => n.user_id || n.id)
+    // Clean up shownPopupClients ONLY for clients that no longer have an active unapproved request
+    const pendingClientKeys = new Set(
+      pending.map((n) => n.user_id || n.id)
     );
     for (const key of shownPopupClients) {
-      if (!activeClientKeys.has(key)) {
+      if (!pendingClientKeys.has(key)) {
         shownPopupClients.delete(key);
       }
     }
@@ -767,10 +771,12 @@ async function loadNotifications(showPopup = true) {
         const clientKey = n.user_id || n.id;
         if (shownPopupClients.has(clientKey) || shownPopupNotificationIds.has(n.id)) return false;
 
-        // ONLY trigger popup if request is currently in State 1: Temp Quarantine (0-45 seconds)
-        if (n.status !== 'quarantine') return false;
-        const age = now - new Date(n.created_at).getTime();
-        return age < 45000;
+        // Check if unapproved connection request has not expired (within 5-minute timeout)
+        const expires = n.expires_at ? new Date(n.expires_at).getTime() : (new Date(n.created_at).getTime() + 300000);
+        if (now > expires) return false;
+
+        // Show popup once for unapproved request (quarantine or quarantine_wait)
+        return ['quarantine', 'quarantine_wait', 'unread', 'approved_holding'].includes(n.status);
       });
 
       if (freshRequest) {
@@ -835,22 +841,29 @@ function showNotificationPopup(notification) {
     // Client Type- new or returning, Device Name, visit number, last session details like last logged time, & Total Last logged time, Total Data used for last session. Remove other details.
     const details = parsePopupDetails(notification.message);
     const isReturning = details.clientType === 'Returning';
+    const isPending = notification.status === 'quarantine_wait' || notification.status === 'unread' || notification.status === 'approved_holding';
+    const isAllowed = notification.status === 'allowed';
+    const isDenied = ['denied', 'quarantine_auto_denied'].includes(notification.status);
 
     if (titleText) titleText.textContent = isReturning ? '🛡️ Returning Client Request' : '🛡️ New Connection Request';
+
     if (badge) {
       badge.classList.remove('hidden');
-      badge.className = 'status-badge quarantine';
-      badge.textContent = 'Temp Quarantine (0-45s)';
-    }
-    if (timerBox) timerBox.classList.remove('hidden');
-    if (waitBtn) {
-      waitBtn.classList.remove('hidden');
-      waitBtn.textContent = '⏳ Move to Pending';
-      waitBtn.style.background = '#d97706';
-      waitBtn.style.color = '#fff';
-      waitBtn.style.fontWeight = '600';
-      waitBtn.title = 'Move request to Pending queue (Internet stays OFF)';
-      waitBtn.onclick = () => respondToNotification(notification.id, 'wait');
+      if (isAllowed) {
+        badge.className = 'status-badge allowed';
+        badge.textContent = 'State 3: Allowed (Internet ON)';
+      } else if (isDenied) {
+        badge.className = 'status-badge blocked';
+        badge.textContent = notification.status === 'quarantine_auto_denied' ? 'State 4: Denied (5m Timeout)' : 'State 4: Denied by Owner';
+      } else if (isPending) {
+        badge.className = 'status-badge quarantine_wait';
+        badge.style.background = '#ffedd5';
+        badge.style.color = '#c2410c';
+        badge.textContent = 'State 2: Pending Approval';
+      } else {
+        badge.className = 'status-badge quarantine';
+        badge.textContent = 'State 1: Temp Quarantine (0-45s)';
+      }
     }
 
     $('#notificationModalText').innerHTML = `
@@ -884,28 +897,71 @@ function showNotificationPopup(notification) {
       </div>
     `;
 
-    denyBtn.disabled = false;
-    denyBtn.textContent = '🚫 Disallow';
-    denyBtn.style.background = '#b91c1c';
-    denyBtn.style.color = '#fff';
-    denyBtn.style.fontWeight = '600';
-    denyBtn.title = 'Disallow client and block internet access';
-    denyBtn.onclick = () => respondToNotification(notification.id, 'deny');
+    if (isAllowed || isDenied) {
+      if (timerBox) timerBox.classList.add('hidden');
+      if (waitBtn) waitBtn.classList.add('hidden');
+      if (isAllowed) {
+        allowBtn.disabled = true;
+        allowBtn.style.opacity = '0.5';
+        allowBtn.style.cursor = 'default';
+        allowBtn.textContent = 'Allowed (Active)';
+        allowBtn.style.background = '#166534';
+        denyBtn.disabled = false;
+        denyBtn.textContent = 'Disconnect / Revoke';
+        denyBtn.style.background = '#b91c1c';
+        denyBtn.onclick = () => respondToNotification(notification.id, 'disconnect');
+      } else {
+        allowBtn.disabled = false;
+        allowBtn.style.opacity = '1';
+        allowBtn.style.cursor = 'pointer';
+        allowBtn.textContent = 'Re-Allow Access';
+        allowBtn.style.background = '#166534';
+        allowBtn.onclick = () => respondToNotification(notification.id, 'allow');
+        denyBtn.disabled = false;
+        denyBtn.textContent = 'Close';
+        denyBtn.style.background = '#64748b';
+        denyBtn.onclick = closeModal;
+      }
+    } else {
+      if (timerBox) timerBox.classList.remove('hidden');
+      if (waitBtn) {
+        if (isPending) {
+          waitBtn.classList.add('hidden');
+        } else {
+          waitBtn.classList.remove('hidden');
+          waitBtn.textContent = '⏳ Move to Pending';
+          waitBtn.style.background = '#d97706';
+          waitBtn.style.color = '#fff';
+          waitBtn.style.fontWeight = '600';
+          waitBtn.title = 'Move request to Pending queue (Internet stays OFF)';
+          waitBtn.onclick = () => respondToNotification(notification.id, 'wait');
+        }
+      }
 
-    allowBtn.disabled = false;
-    allowBtn.style.opacity = '1';
-    allowBtn.style.cursor = 'pointer';
-    allowBtn.textContent = '✅ Allow Access';
-    allowBtn.style.background = '#166534';
-    allowBtn.style.color = '#ffffff';
-    allowBtn.style.fontWeight = '700';
-    allowBtn.title = 'Approve connection and grant Internet access';
-    allowBtn.onclick = () => {
-      if (allowBtn.disabled) return;
-      respondToNotification(notification.id, 'allow');
-    };
+      denyBtn.disabled = false;
+      denyBtn.textContent = '🚫 Disallow';
+      denyBtn.style.background = '#b91c1c';
+      denyBtn.style.color = '#fff';
+      denyBtn.style.fontWeight = '600';
+      denyBtn.title = 'Disallow client and block internet access';
+      denyBtn.onclick = () => respondToNotification(notification.id, 'deny');
+
+      allowBtn.disabled = false;
+      allowBtn.style.opacity = '1';
+      allowBtn.style.cursor = 'pointer';
+      allowBtn.textContent = '✅ Allow Access';
+      allowBtn.style.background = '#166534';
+      allowBtn.style.color = '#ffffff';
+      allowBtn.style.fontWeight = '700';
+      allowBtn.title = 'Approve connection and grant Internet access';
+      allowBtn.onclick = () => {
+        if (allowBtn.disabled) return;
+        respondToNotification(notification.id, 'allow');
+      };
+    }
 
     function updateTimers() {
+      if (isAllowed || isDenied) return;
       const now = Date.now();
       const createdTime = new Date(notification.created_at).getTime();
       const expires = notification.expires_at ? new Date(notification.expires_at).getTime() : (createdTime + 300000);
@@ -934,13 +990,24 @@ function showNotificationPopup(notification) {
         if (waitBtn) waitBtn.classList.add('hidden');
         denyBtn.textContent = 'Close';
         denyBtn.onclick = closeModal;
-      } else if (reviewRemaining === 0) {
-        // 45s popup review window finished without response -> Move to State 2: Pending!
-        if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
-        modal.classList.add('hidden');
-        if (state.page === 'notifications') {
-          state.notificationTab = 'pending';
-          renderAdmin();
+      } else if (isPending || reviewRemaining === 0) {
+        // State 2: In Pending Approval Queue
+        if (badge) {
+          badge.className = 'status-badge quarantine_wait';
+          badge.style.background = '#ffedd5';
+          badge.style.color = '#c2410c';
+          badge.textContent = 'State 2: Pending Approval';
+        }
+        if (waitBtn) waitBtn.classList.add('hidden');
+        if (holdEl) {
+          holdEl.textContent = 'Review window ended → in Pending queue (Internet OFF)';
+          holdEl.style.color = '#c2410c';
+        }
+        if (timeoutEl) {
+          const mins = Math.floor(timeoutRemaining / 60);
+          const secs = String(timeoutRemaining % 60).padStart(2, '0');
+          timeoutEl.textContent = `${mins}m ${secs}s (auto-disallows at 0s)`;
+          timeoutEl.style.color = timeoutRemaining < 60 ? '#b91c1c' : '#92400e';
         }
       } else {
         if (holdEl) {
@@ -1020,4 +1087,4 @@ function togglePassword(id, button) { const input = $(`#${id}`); const isVisible
 function showLoginCard() { $('#loginCard').classList.remove('hidden'); $('#registerCard').classList.add('hidden'); }
 function showRegisterCard() { $('#loginCard').classList.add('hidden'); $('#registerCard').classList.remove('hidden'); }
 function logout() { state.token = ''; state.data = null; localStorage.removeItem('secmynet-token'); sessionStorage.removeItem('secmynet-session-start'); $('#authSection').classList.remove('hidden'); $('#dashboard').classList.add('hidden'); $('#userDashboard').classList.add('hidden'); $('#adminIdentity').classList.add('hidden'); showLoginCard(); }
-$('#registerForm').addEventListener('submit', register); $('#loginForm').addEventListener('submit', (e) => login(e, '/api/login')); $('#showRegisterLink').addEventListener('click', showRegisterCard); $('#showLoginLink').addEventListener('click', showLoginCard); document.querySelectorAll('[data-password-toggle]').forEach((button) => button.addEventListener('click', () => togglePassword(button.dataset.passwordToggle, button))); $('#confirmPassword').addEventListener('input', () => { const matches = $('#registerPassword').value === $('#confirmPassword').value; $('#passwordError').textContent = $('#confirmPassword').value && !matches ? 'Passwords do not match.' : ''; }); $('#userLogoutBtn').addEventListener('click', logout); $('#adminIdentityLogout').addEventListener('click', logout); $('#sidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-page]'); if (a) { e.preventDefault(); navigate(a.dataset.page); } }); $('#userSidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-user-page]'); if (a) { e.preventDefault(); state.userPage = a.dataset.userPage; history.replaceState(null, '', `#my-${state.userPage}`); renderUserPage(); } }); $('#backToListBtn').addEventListener('click', () => { state.selected = null; renderAdmin(); }); document.addEventListener('click', (e) => { const button = e.target.closest('[data-notification-response]'); if (button) { const [id, action] = button.dataset.notificationResponse.split('|'); respondToNotification(id, action); } const clearBtn = e.target.closest('[data-notification-clear]'); if (clearBtn) { clearNotification(clearBtn.dataset.notificationClear); } const clearTabBtn = e.target.closest('[data-notification-clear-tab]'); if (clearTabBtn) { clearAllNotifications(clearTabBtn.dataset.notificationClearTab); } const clearAllBtn = e.target.closest('[data-notification-clear-all]'); if (clearAllBtn) { clearAllNotifications(null); } const tabBtn = e.target.closest('[data-notif-tab]'); if (tabBtn) { state.notificationTab = tabBtn.dataset.notifTab; renderAdmin(); } }); if (state.token) { loadDashboard(); setInterval(() => loadNotifications(), 3000); }
+$('#registerForm').addEventListener('submit', register); $('#loginForm').addEventListener('submit', (e) => login(e, '/api/login')); $('#showRegisterLink').addEventListener('click', showRegisterCard); $('#showLoginLink').addEventListener('click', showLoginCard); document.querySelectorAll('[data-password-toggle]').forEach((button) => button.addEventListener('click', () => togglePassword(button.dataset.passwordToggle, button))); $('#confirmPassword').addEventListener('input', () => { const matches = $('#registerPassword').value === $('#confirmPassword').value; $('#passwordError').textContent = $('#confirmPassword').value && !matches ? 'Passwords do not match.' : ''; }); $('#userLogoutBtn').addEventListener('click', logout); $('#adminIdentityLogout').addEventListener('click', logout); $('#sidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-page]'); if (a) { e.preventDefault(); navigate(a.dataset.page); } }); $('#userSidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-user-page]'); if (a) { e.preventDefault(); state.userPage = a.dataset.userPage; history.replaceState(null, '', `#my-${state.userPage}`); renderUserPage(); } }); $('#backToListBtn').addEventListener('click', () => { state.selected = null; renderAdmin(); }); document.addEventListener('click', (e) => { const button = e.target.closest('[data-notification-response]'); if (button) { const [id, action] = button.dataset.notificationResponse.split('|'); respondToNotification(id, action); } const clearBtn = e.target.closest('[data-notification-clear]'); if (clearBtn) { clearNotification(clearBtn.dataset.notificationClear); } const clearTabBtn = e.target.closest('[data-notification-clear-tab]'); if (clearTabBtn) { clearAllNotifications(clearTabBtn.dataset.notificationClearTab); } const clearAllBtn = e.target.closest('[data-notification-clear-all]'); if (clearAllBtn) { clearAllNotifications(null); } const tabBtn = e.target.closest('[data-notif-tab]'); if (tabBtn) { state.notificationTab = tabBtn.dataset.notifTab; renderAdmin(); } const openPopupBtn = e.target.closest('[data-open-popup]'); if (openPopupBtn) { const n = (state.notifications || []).find((x) => x.id === openPopupBtn.dataset.openPopup); if (n) showNotificationPopup(n); } const simBtn = e.target.closest('[data-simulate-request]'); if (simBtn) { const type = simBtn.dataset.simulateRequest; (async () => { try { const res = await apiRequest('/api/notifications/simulate-test', { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ type }) }); await loadNotifications(true); if (res && res.notification) { showNotificationPopup(res.notification); } } catch (err) { alert(err.message); } })(); } }); if (state.token) { loadDashboard(); setInterval(() => loadNotifications(), 3000); }

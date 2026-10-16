@@ -1581,6 +1581,66 @@ app.get('/api/notifications', authRequired, adminRequired, async (_req, res) => 
   res.json({ notifications: Array.from(clientMap.values()) });
 });
 
+// Admin test endpoint to simulate a fresh connection request (New or Returning)
+app.post('/api/notifications/simulate-test', authRequired, adminRequired, async (req, res) => {
+  await ensureDb();
+  try {
+    const isReturning = req.body?.type === 'returning';
+    const testMac = isReturning ? '38:c6:bd:91:f6:26' : '02:' + Array.from({ length: 5 }, () => Math.floor(Math.random() * 256).toString(16).padStart(2, '0')).join(':');
+    const testIp = isReturning ? '192.168.1.204' : `192.168.1.${Math.floor(Math.random() * 80) + 120}`;
+    const testHostname = isReturning ? 'Redmi-13C-5G' : (req.body?.deviceName || 'iPhone-15-Pro');
+    const userId = 'user-mac-' + testMac.replace(/[^a-z0-9]/g, '');
+
+    // Find any existing router
+    let router = await get('SELECT id FROM openwrt_routers ORDER BY created_at DESC LIMIT 1');
+    const routerId = router ? router.id : '558971';
+
+    // Find or create device for router
+    let device = await get('SELECT id FROM devices WHERE router_id = $1 LIMIT 1', [routerId]);
+    const deviceId = device ? device.id : 'device-' + routerId;
+
+    // Clean up any stale notification or connection for this test client so it triggers a fresh Temp Quarantine request
+    await run('DELETE FROM notifications WHERE user_id = $1', [userId]);
+    await run('DELETE FROM connections WHERE user_id = $1', [userId]);
+    disallowedStationUserIds.delete(`${deviceId}:${userId}`);
+
+    // If simulating returning user, add a past disconnected connection so visit details can be generated
+    if (isReturning) {
+      const pastConnId = makeId('connection');
+      const twoHoursAgo = new Date(Date.now() - 7200000).toISOString();
+      const oneHourAgo = new Date(Date.now() - 3600000).toISOString();
+      await run(
+        `INSERT INTO connections (id, device_id, user_id, status, data_used_mb, connected_at, disconnected_at)
+         VALUES ($1, $2, $3, 'disconnected', 45.50, $4, $5)`,
+        [pastConnId, deviceId, userId, twoHoursAgo, oneHourAgo]
+      );
+    }
+
+    await processTelemetry(routerId, [
+      {
+        mac: testMac,
+        ip: testIp,
+        hostname: testHostname,
+        rx_bytes: 1048576,
+        tx_bytes: 524288
+      }
+    ]);
+
+    const createdNotif = await get(
+      "SELECT * FROM notifications WHERE type = 'connection_request' AND user_id = $1 ORDER BY created_at DESC LIMIT 1",
+      [userId]
+    );
+
+    res.json({
+      success: true,
+      message: `Simulated ${isReturning ? 'Returning' : 'New'} client request created!`,
+      notification: createdNotif
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Register push token for the authenticated user
 app.post('/api/me/push-token', authRequired, async (req, res) => {
   await ensureDb();
