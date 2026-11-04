@@ -1,4 +1,5 @@
 const state = { token: localStorage.getItem('secmynet-token') || '', data: null, userData: null, superAdmins: [], routers: [], notifications: [], page: 'overview', userPage: 'locations', selected: null, showLocationForm: false, locationFormTarget: null, showRouterForm: false, routerFormTarget: null, usagePeriod: 'all', deviceUsagePeriod: 'all' };
+const deniedCountdownMap = new Map();
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
 function generateClientSerialNumber() {
@@ -16,7 +17,7 @@ async function apiRequest(url, options = {}) { const response = await fetch(url,
 function usage(connections, period = 'all') { const cutoffs = { day: 1, week: 7, month: 30, year: 365 }; const from = cutoffs[period] ? Date.now() - cutoffs[period] * 86400000 : 0; return connections.filter((c) => !from || new Date(c.connectedAt || c.connected_at).getTime() >= from).reduce((sum, c) => sum + Number(c.dataUsedMb || c.data_used_mb || 0), 0); }
 function stat(label, value, note = '') { return `<div class="stat-box"><span>${escapeHtml(label)}</span><strong>${value}</strong>${note ? `<small>${escapeHtml(note)}</small>` : ''}</div>`; }
 function table(headers, body) { return `<div class="table-wrap"><table><thead><tr>${headers.map((h) => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body || `<tr><td colspan="${headers.length}" class="empty">No records available yet.</td></tr>`}</tbody></table></div>`; }
-function connectedForDevice(id) { return state.data.connections.filter((c) => (c.device_id || c.deviceId) === id && c.status === 'connected'); }
+function connectedForDevice(id) { return state.data.connections.filter((c) => (c.device_id || c.deviceId) === id && ['connected', 'quarantine'].includes(c.status)); }
 function connectionsForDevice(id) { return state.data.connections.filter((c) => (c.device_id || c.deviceId) === id); }
 function locationForDevice(device) { return device.location || state.data.locations.find((l) => l.id === device.location_id); }
 
@@ -24,8 +25,14 @@ function renderOverview() {
   const d = state.data;
   const telemetryClients = (state.routers || []).flatMap((r) => (r.clients || []).map((cl) => ({ ...cl, routerName: r.name })));
   const totalActive = Math.max(d.stats.activeConnections, telemetryClients.length);
-  const connRows = d.connections.filter((c) => c.status === 'connected').map((c) => `<tr><td>${escapeHtml(c.userName)}</td><td>${escapeHtml(c.deviceName)}</td><td>${mb(c.dataUsedMb)}</td><td><span class="status-badge connected">Connected</span></td></tr>`).join('');
-  const telemetryRows = telemetryClients.map((cl) => {
+  const activeConns = d.connections.filter((c) => ['connected', 'quarantine'].includes(c.status));
+  const activeConnMacs = new Set(activeConns.map((c) => (c.userEmail || '').toLowerCase()));
+  const connRows = activeConns.map((c) => {
+    const badge = c.status === 'quarantine' ? '<span class="status-badge quarantine">Quarantine</span>' : '<span class="status-badge connected">Connected</span>';
+    return `<tr><td><strong>${escapeHtml(c.userName)}</strong><small>${escapeHtml(c.userEmail)}</small></td><td>${escapeHtml(c.deviceName)}</td><td>${mb(c.dataUsedMb)}</td><td>${badge}</td></tr>`;
+  }).join('');
+  const unmappedTelemetry = telemetryClients.filter((cl) => !activeConnMacs.has((cl.mac || '').toLowerCase()));
+  const telemetryRows = unmappedTelemetry.map((cl) => {
     const totalMb = ((Number(cl.rx_bytes || 0) + Number(cl.tx_bytes || 0)) / (1024 * 1024)).toFixed(2);
     return `<tr><td><strong>${escapeHtml(cl.hostname || 'Client')}</strong><small>${escapeHtml(cl.mac || '')}</small></td><td>${escapeHtml(cl.routerName)}</td><td>${mb(totalMb)}</td><td><span class="status-badge connected">Connected</span></td></tr>`;
   }).join('');
@@ -89,26 +96,52 @@ function userRows() {
 			const mac = (cl.mac || '').toLowerCase();
 			return !activeConnections.some((c) => (c.user_email || c.userEmail || c.user_id || '').toLowerCase().includes(mac));
 		}).map((cl) => {
+			const mac = (cl.mac || '').toLowerCase();
 			const rxMb = (Number(cl.rx_bytes || 0) / (1024 * 1024)).toFixed(2);
 			const txMb = (Number(cl.tx_bytes || 0) / (1024 * 1024)).toFixed(2);
 			const totalMb = ((Number(cl.rx_bytes || 0) + Number(cl.tx_bytes || 0)) / (1024 * 1024)).toFixed(2);
 			const devName = r.name || 'OpenWrt Router';
 			const devIp = cl.ip || '192.168.1.1';
 			const locName = r.location_name || 'Unassigned';
-			const fakeUserId = 'user-mac-' + (cl.mac || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-			const actions = `<button class="action-button" data-user-details="${escapeHtml(fakeUserId)}">Details</button><button class="action-button danger-action" data-disconnect-router-client="${r.id}|${cl.mac}">Disconnect</button><button class="action-button danger" data-block-router-client="${r.id}|${cl.mac}">Blacklist</button>`;
-			return `<tr><td><strong>${escapeHtml(cl.hostname || 'Client')}</strong><small>MAC: ${escapeHtml(cl.mac || '')}</small><small style="display:block;color:#0284c7;font-size:0.72rem;margin-top:2px;">📶 Signal: ${cl.signal !== undefined ? cl.signal + ' dBm' : '—'} · Wi-Fi Client</small></td><td>${escapeHtml(locName)}</td><td><strong>${escapeHtml(devName)}</strong><small>IP: <code>${escapeHtml(devIp)}</code></small><small style="display:block;color:#64748b;font-size:0.72rem;">Router ID: ${escapeHtml(r.id)}</small></td><td><strong>${mb(totalMb)}</strong><small style="display:block;color:#64748b;font-size:0.75rem;margin-top:2px;">RX: ${mb(rxMb)} · TX: ${mb(txMb)}</small></td><td><span class="status-badge connected">Connected</span></td><td>${actions}</td></tr>`;
+			const fakeUserId = 'user-mac-' + mac.replace(/[^a-z0-9]/g, '');
+			const clientNotif = (state.notifications || []).find((n) => (n.user_id === fakeUserId || (n.message || '').toLowerCase().includes(mac)));
+			const clientConn = (state.data.connections || []).find((c) => (c.user_id || c.userId) === fakeUserId);
+
+			let statusHtml = '<span class="status-badge quarantine">Quarantine</span>';
+			if (clientNotif?.status === 'allowed' || clientConn?.status === 'connected') {
+				statusHtml = '<span class="status-badge connected">Allowed</span>';
+			} else if (clientNotif?.status === 'quarantine_wait') {
+				statusHtml = '<span class="status-badge quarantine_wait">Pending Approval</span>';
+			} else if (['denied', 'quarantine_auto_denied', 'disconnected'].includes(clientNotif?.status) || clientConn?.status === 'disconnected') {
+				statusHtml = '<span class="status-badge blocked">Rejected / Blocked</span>';
+			}
+
+			let actions = `<button class="action-button" data-user-details="${escapeHtml(fakeUserId)}">Details</button>`;
+			if (clientNotif && ['denied', 'quarantine_auto_denied', 'disconnected'].includes(clientNotif.status)) {
+				actions += `<button class="action-button" style="background:#16a34a;color:#fff;font-weight:700;" data-notification-response="${clientNotif.id}|allow" title="Reallow internet access">✅ Reallow</button>`;
+			} else if (clientNotif && ['quarantine', 'quarantine_wait', 'unread'].includes(clientNotif.status)) {
+				actions += `<button class="action-button" style="background:#16a34a;color:#fff;font-weight:700;" data-notification-response="${clientNotif.id}|allow">Allow</button><button class="action-button danger" data-notification-response="${clientNotif.id}|deny">Reject</button>`;
+			} else {
+				actions += `<button class="action-button danger-action" data-disconnect-router-client="${r.id}|${cl.mac}">Disconnect</button><button class="action-button danger" data-block-router-client="${r.id}|${cl.mac}">Blacklist</button>`;
+			}
+			return `<tr><td><strong>${escapeHtml(cl.hostname || 'Client')}</strong><small>MAC: ${escapeHtml(cl.mac || '')}</small><small style="display:block;color:#0284c7;font-size:0.72rem;margin-top:2px;">📶 Signal: ${cl.signal !== undefined ? cl.signal + ' dBm' : '—'} · Wi-Fi Client</small></td><td>${escapeHtml(locName)}</td><td><strong>${escapeHtml(devName)}</strong><small>IP: <code>${escapeHtml(devIp)}</code></small><small style="display:block;color:#64748b;font-size:0.72rem;">Router ID: ${escapeHtml(r.id)}</small></td><td><strong>${mb(totalMb)}</strong><small style="display:block;color:#64748b;font-size:0.75rem;margin-top:2px;">RX: ${mb(rxMb)} · TX: ${mb(txMb)}</small></td><td>${statusHtml}</td><td>${actions}</td></tr>`;
 		});
 	});
 
 	const extraUserItems = registeredUsers.map((user) => {
 		const userConns = state.data.connections.filter((item) => (item.user_id || item.userId) === user.id);
 		const disabled = user.accessStatus === 'disabled';
-		const status = disabled ? '<span class="status-badge blocked">Disabled</span>' : '<span class="status-badge">Registered</span>';
 		const clientMac = (user.email || '').toLowerCase();
 		const isMac = /^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(clientMac) || user.id.startsWith('user-mac-');
 		const rClient = (state.routers || []).flatMap((r) => r.clients || []).find((c) => (c.mac || '').toLowerCase() === clientMac);
 		const matchedRouter = rClient ? (state.routers || []).find((r) => (r.clients || []).some((c) => (c.mac || '').toLowerCase() === clientMac)) : null;
+		// If user's MAC is currently visible in live router telemetry → show "Online"
+		const isOnline = Boolean(rClient);
+		const status = disabled
+			? '<span class="status-badge blocked">Disabled</span>'
+			: isOnline
+				? '<span class="status-badge connected">🟢 Online</span>'
+				: '<span class="status-badge">Registered</span>';
 
 		let usageHtml = '';
 		const totalDataVal = usage(userConns, state.usagePeriod);
@@ -138,7 +171,12 @@ function renderNotifications() {
   if (notificationsLiveTimer) { clearInterval(notificationsLiveTimer); notificationsLiveTimer = null; }
   const now = Date.now();
 
-  // Deduplicate by client key (user_id || id) so that for each client, exactly ONE request is present in only one of the four states:
+  // Clean up any expired denial countdowns
+  for (const [id, exp] of deniedCountdownMap.entries()) {
+    if (now >= exp) deniedCountdownMap.delete(id);
+  }
+
+  // Deduplicate by client key (user_id || id) so that for each client, exactly ONE request is present in only one of the states:
   const clientMap = new Map();
   for (const n of state.notifications || []) {
     const key = n.user_id || n.id;
@@ -148,58 +186,116 @@ function renderNotifications() {
   }
   const deduplicatedItems = Array.from(clientMap.values());
 
-  // 4 Mutually Exclusive States:
-  // State a) 45 sec temp quarantine:
-  const tempQuarantineItems = deduplicatedItems.filter((n) => {
+  const getClientDetails = (n) => {
+    if (n.client_details) return n.client_details;
+    const isRet = (n.message || '').includes('Returning user');
+    return {
+      clientDeviceName: n.user_name || (n.message ? (n.message.match(/(?:detected|user):\s*([^[.]+)/i)?.[1] || 'Client Device') : 'Client Device'),
+      ipAddress: (n.message ? n.message.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/)?.[1] : null) || '192.168.1.188',
+      macAddress: (n.user_email && /^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(n.user_email) ? n.user_email : (n.message ? n.message.match(/\[([0-9a-fA-F:]{17})\]/)?.[1] : '—')).toUpperCase(),
+      lastConnected: isRet ? (n.message.match(/Last logged:\s*([^·(]+)/)?.[1] || 'Earlier session') : 'First connection',
+      lastDisconnected: '—',
+      lastSessionDataMb: isRet ? (n.message.match(/Total past usage:\s*([0-9.]+\s*MB)/i)?.[1] || '0.00 MB') : '0.00 MB',
+      totalPastUsageMb: isRet ? (n.message.match(/Total past usage:\s*([0-9.]+\s*MB)/i)?.[1] || '0.00 MB') : '0.00 MB',
+      visitCount: isRet ? ((n.message.match(/Visit #(\d+)/i) ? parseInt(n.message.match(/Visit #(\d+)/i)[1], 10) : 2)) : 1,
+      isReturning: isRet
+    };
+  };
+
+  // State 1) New Request tab:
+  // Fresh incoming connection requests in review (quarantine status),
+  // PLUS requests where Deny was clicked within the last 45s (undergoing 45s transition before moving to Rejected).
+  const newRequestItems = deduplicatedItems.filter((n) => {
     if (n.type !== 'connection_request') return false;
-    if (n.status !== 'quarantine') return false;
-    const age = now - new Date(n.created_at).getTime();
-    return age < 45000;
+    const isDeniedCountdown = deniedCountdownMap.has(n.id) || (n.status === 'denied' && n.denied_at && (now - new Date(n.denied_at).getTime() < 45000));
+    if (isDeniedCountdown) return true;
+    return n.status === 'quarantine';
   });
 
-  // State b) pending:
+  // State 2) Pending tab:
+  // Requests kept on hold via Wait ('quarantine_wait')
   const pendingItems = deduplicatedItems.filter((n) => {
     if (n.type !== 'connection_request') return false;
-    if (n.status === 'quarantine_wait' || n.status === 'unread' || n.status === 'approved_holding') return true;
-    if (n.status === 'quarantine') {
-      const age = now - new Date(n.created_at).getTime();
-      return age >= 45000;
-    }
+    if (['allowed', 'denied', 'quarantine_auto_denied', 'disconnected'].includes(n.status)) return false;
+    if (n.status === 'quarantine_wait') return true;
+    if (['unread', 'approved_holding'].includes(n.status)) return true;
     return false;
   });
 
-  // State c) allowed:
+  // State 3) Allowed tab:
   const allowedItems = deduplicatedItems.filter((n) => n.status === 'allowed');
 
-  // State d) dis-allowed:
+  // State 4) Rejected tab:
+  // Requests disallowed/denied (after 45s transition), timed out (5m auto-denied), or disconnected
   const disallowedItems = deduplicatedItems.filter((n) => {
+    const isDeniedCountdown = deniedCountdownMap.has(n.id) || (n.status === 'denied' && n.denied_at && (now - new Date(n.denied_at).getTime() < 45000));
+    if (isDeniedCountdown) return false; // Still displayed in New Request tab during 45s transition!
     return ['denied', 'quarantine_auto_denied', 'disconnected'].includes(n.status) || (n.type === 'overconsumption' && n.status !== 'allowed');
   });
 
   // Default to appropriate tab if not set or invalid
-  if (!state.notificationTab || !['temp_quarantine', 'pending', 'allowed', 'disallowed'].includes(state.notificationTab)) {
-    if (tempQuarantineItems.length > 0) state.notificationTab = 'temp_quarantine';
+  if (!state.notificationTab || !['new_request', 'pending', 'allowed', 'rejected', 'disallowed'].includes(state.notificationTab)) {
+    if (newRequestItems.length > 0) state.notificationTab = 'new_request';
     else if (pendingItems.length > 0) state.notificationTab = 'pending';
     else if (allowedItems.length > 0) state.notificationTab = 'allowed';
-    else state.notificationTab = 'temp_quarantine';
+    else state.notificationTab = 'new_request';
   }
+  if (state.notificationTab === 'disallowed') state.notificationTab = 'rejected';
 
-  const tempQuarantineRows = tempQuarantineItems.map((n) => {
-    const isReturning = (n.message || '').includes('Returning user');
-    const elapsedSec = Math.floor((now - new Date(n.created_at).getTime()) / 1000);
+  const newRequestRows = newRequestItems.map((n) => {
+    const det = getClientDetails(n);
+    const createdTime = new Date(n.created_at).getTime();
+    const elapsedSec = Math.floor((now - createdTime) / 1000);
     const reviewRemaining = Math.max(0, 45 - elapsedSec);
-    const expires = n.expires_at ? new Date(n.expires_at).getTime() : (new Date(n.created_at).getTime() + 300000);
-    const timeoutRemaining = Math.max(0, Math.ceil((expires - now) / 1000));
-    const mins = Math.floor(timeoutRemaining / 60);
-    const secs = String(timeoutRemaining % 60).padStart(2, '0');
 
-    const actions = `<button class="action-button" style="background:#166534;color:#fff;font-weight:700;" data-notification-response="${n.id}|allow" title="Turn Internet ON">✅ Allow Access (Internet ON)</button><button class="action-button" style="background:#d97706;color:#fff;font-weight:600;" data-notification-response="${n.id}|wait" title="Move to Pending Approvals">⏳ Move to Pending (Internet OFF)</button><button class="action-button danger" data-notification-response="${n.id}|deny">🚫 Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
-    const typeBadge = isReturning ? '<span class="status-badge" style="background:#e0f2fe;color:#0369a1;font-size:0.72rem;margin-left:6px;">Returning Client</span>' : '';
-    return `<tr><td>Temp Quarantine${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong><br><small style="color:#b91c1c;font-weight:700;">🔴 Internet Service: COMPLETELY OFF</small> · <small style="color:#0284c7;font-weight:700;">⏱️ 45s Review: ${reviewRemaining}s left (moves to Pending at 0s)</small> · <small style="color:#b45309;">⏳ 5m Auto-Disallow: ${mins}m ${secs}s</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+    // Check if in 45s Denied countdown
+    const deniedExp = deniedCountdownMap.get(n.id) || (n.denied_at ? (new Date(n.denied_at).getTime() + 45000) : null);
+    const isDenying = Boolean(deniedExp && now < deniedExp);
+    const denyRemaining = isDenying ? Math.max(0, Math.ceil((deniedExp - now) / 1000)) : 0;
+
+    let stateBadge = '';
+    let statusText = '';
+    let actions = '';
+
+    if (isDenying) {
+      stateBadge = `<span class="status-badge blocked" style="font-weight:700;">🔴 Disallowed</span><br><span class="status-badge" style="background:#fee2e2;color:#991b1b;font-size:0.75rem;margin-top:4px;">⏳ To Rejected (${denyRemaining}s)</span>`;
+      statusText = `
+        <strong>${escapeHtml(det.clientDeviceName)}</strong> <span style="font-family:monospace;color:#475569;">[${escapeHtml(det.macAddress)}]</span>
+        <br><small style="color:#dc2626;font-weight:700;">🔴 Internet Service: OFF (Disallowed)</small> · <small style="color:#b91c1c;font-weight:600;">Disallowed from internet. Moving to Rejected tab in ${denyRemaining}s...</small>
+        <br><small style="color:#475569;">IP: <strong>${escapeHtml(det.ipAddress)}</strong> · Last session data: <strong>${escapeHtml(det.lastSessionDataMb)}</strong></small>
+      `;
+      actions = `
+        <button class="action-button" style="background:#16a34a;color:#fff;font-weight:700;" data-notification-response="${n.id}|allow" title="Grant Internet Access">✅ Allow</button>
+        <button class="action-button secondary" style="background:#64748b;color:#fff;cursor:default;" disabled title="Disallowed from Internet">🚫 Disallowed (${denyRemaining}s)</button>
+        ${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;font-weight:600;" data-user-details="${escapeHtml(n.user_id)}" title="View client details and connection history">📜 View History</button>` : ''}
+      `;
+    } else {
+      const typeBadge = det.isReturning
+        ? '<span class="status-badge" style="background:#e0f2fe;color:#0369a1;font-size:0.72rem;margin-left:4px;">Returning Client</span>'
+        : '<span class="status-badge" style="background:#dcfce7;color:#15803d;font-size:0.72rem;margin-left:4px;">New Client</span>';
+      const reviewBadgeText = reviewRemaining > 0 ? `⏱️ 45s Review (${reviewRemaining}s)` : '⚡ Review Ready';
+      stateBadge = `<span class="status-badge quarantine">${reviewBadgeText}</span><br>${typeBadge}`;
+      const reviewMsg = reviewRemaining > 0
+        ? `⏱️ ${reviewRemaining}s review countdown remaining`
+        : '⚡ Review countdown complete · Ready for owner action (Allow / Deny / Wait)';
+      statusText = `
+        <strong>${escapeHtml(det.clientDeviceName)}</strong> <span style="font-family:monospace;color:#475569;">[${escapeHtml(det.macAddress)}]</span>
+        <br><small style="color:#dc2626;font-weight:700;">🔴 Internet Service: OFF (Temp Quarantine)</small> · <small style="color:#0284c7;font-weight:600;">${reviewMsg}</small>
+        <br><small style="color:#475569;">IP: <strong>${escapeHtml(det.ipAddress)}</strong> · Last connected: <strong>${escapeHtml(det.lastConnected)}</strong> · Last data: <strong>${escapeHtml(det.lastSessionDataMb)}</strong></small>
+      `;
+      actions = `
+        <button class="action-button" style="background:#16a34a;color:#fff;font-weight:700;" data-notification-response="${n.id}|allow" title="Grant Internet Access (Moves to Allowed)">✅ Allow</button>
+        <button class="action-button danger" style="background:#dc2626;color:#fff;font-weight:600;" data-notification-response="${n.id}|deny" title="Disallow from internet immediately (Moves to Rejected in 45s)">🚫 Deny</button>
+        <button class="action-button" style="background:#d97706;color:#fff;font-weight:600;" data-notification-response="${n.id}|wait" title="Keep client on hold for permission (Moves to Pending)">⏳ Wait</button>
+        ${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;font-weight:600;" data-user-details="${escapeHtml(n.user_id)}" title="View client details and connection history">📜 View History</button>` : ''}
+      `;
+    }
+
+    return `<tr><td>${stateBadge}</td><td>${statusText}</td><td>${escapeHtml(n.location_name || 'Main Location')}</td><td>${new Date(n.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</td><td><div style="display:flex;gap:6px;flex-wrap:wrap;">${actions}</div></td></tr>`;
   }).join('');
 
   const pendingRows = pendingItems.map((n) => {
-    const isReturning = (n.message || '').includes('Returning user');
+    const det = getClientDetails(n);
     const expires = n.expires_at ? new Date(n.expires_at).getTime() : (new Date(n.created_at).getTime() + 300000);
     const timeoutRemaining = Math.max(0, Math.ceil((expires - now) / 1000));
     const mins = Math.floor(timeoutRemaining / 60);
@@ -207,59 +303,78 @@ function renderNotifications() {
 
     let actions = '';
     if (timeoutRemaining === 0) {
-      actions = `<span class="status-badge blocked">Disallowed (5m Timeout)</span>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;margin-left:6px;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+      actions = `<span class="status-badge blocked">Rejected (5m Timeout)</span>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;margin-left:6px;" data-user-details="${escapeHtml(n.user_id)}">📜 View History</button>` : ''}`;
     } else {
-      actions = `<button class="action-button" style="background:#166534;color:#fff;font-weight:700;" data-notification-response="${n.id}|allow" title="Turn Internet ON">✅ Allow Access (Internet ON)</button><button class="action-button danger" data-notification-response="${n.id}|deny">🚫 Disallow</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">History</button>` : ''}`;
+      actions = `
+        <button class="action-button" style="background:#16a34a;color:#fff;font-weight:700;" data-notification-response="${n.id}|allow" title="Turn Internet ON">✅ Allow Access</button>
+        <button class="action-button danger" style="background:#dc2626;color:#fff;font-weight:600;" data-notification-response="${n.id}|deny">🚫 Reject / Deny</button>
+        ${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;font-weight:600;" data-user-details="${escapeHtml(n.user_id)}" title="View client details and connection history">📜 View History</button>` : ''}
+      `;
     }
-    const typeBadge = isReturning ? '<span class="status-badge" style="background:#e0f2fe;color:#0369a1;font-size:0.72rem;margin-left:6px;">Returning Client</span>' : '';
-    return `<tr><td>Pending approval${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong><br><small style="color:#b91c1c;font-weight:700;">🔴 Internet Service: COMPLETELY OFF</small> · <small style="color:#b45309;font-weight:700;">⏳ Auto-disconnects in ${mins}m ${secs}s if unapproved</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+    const isWaitHold = n.status === 'quarantine_wait';
+    const stateBadge = isWaitHold
+      ? '<span class="status-badge" style="background:#fed7aa;color:#9a3412;font-weight:700;">⏳ Kept on Hold (Wait)</span>'
+      : '<span class="status-badge" style="background:#fef3c7;color:#b45309;">⏳ Pending Approval</span>';
+
+    return `<tr><td>${stateBadge}</td><td><strong>${escapeHtml(det.clientDeviceName)}</strong> <span style="font-family:monospace;color:#475569;">[${escapeHtml(det.macAddress)}]</span><br><small style="color:#b91c1c;font-weight:700;">🔴 Internet Service: OFF</small> · <small style="color:#ea580c;font-weight:700;">⏳ Auto-rejects in: ${mins}m ${secs}s</small><br><small style="color:#475569;">IP: <strong>${escapeHtml(det.ipAddress)}</strong> · Past visits: <strong>${det.visitCount}</strong> · Past data: <strong>${escapeHtml(det.totalPastUsageMb)}</strong></small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td><div style="display:flex;gap:6px;flex-wrap:wrap;">${actions}</div></td></tr>`;
   }).join('');
 
   const approvedRows = allowedItems.map((n) => {
-    const isReturning = (n.message || '').includes('Returning user');
-    const typeBadge = isReturning ? '<span class="status-badge" style="background:#e0f2fe;color:#0369a1;font-size:0.72rem;margin-left:6px;">Returning Client</span>' : '';
-    const actions = `<button class="action-button danger" data-notification-response="${n.id}|disconnect">Disconnect / Revoke Access</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">View History</button>` : ''}<button class="action-button secondary" data-notification-clear="${n.id}">Clear</button>`;
-    return `<tr><td>Allowed / Online${typeBadge}</td><td><strong>${escapeHtml(n.message)}</strong><br><small style="color:#166534;font-weight:700;">🟢 Internet Service: ON (Full Internet Access Granted)</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+    const det = getClientDetails(n);
+    const typeBadge = det.isReturning
+      ? '<span class="status-badge" style="background:#e0f2fe;color:#0369a1;font-size:0.72rem;margin-left:6px;">Returning Client</span>'
+      : '<span class="status-badge" style="background:#dcfce7;color:#15803d;font-size:0.72rem;margin-left:6px;">New Client</span>';
+    const actions = `
+      <button class="action-button danger" data-notification-response="${n.id}|disconnect" title="Revoke internet and disconnect">🚫 Disconnect</button>
+      ${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;font-weight:600;" data-user-details="${escapeHtml(n.user_id)}" title="View client details and connection history">📜 View History</button>` : ''}
+      <button class="action-button danger-action" data-notification-clear="${n.id}" title="Delete this record">🗑️ Delete</button>
+    `;
+    return `<tr><td><span class="status-badge allowed">🟢 Allowed / Online</span>${typeBadge}</td><td><strong>${escapeHtml(det.clientDeviceName)}</strong> <span style="font-family:monospace;color:#475569;">[${escapeHtml(det.macAddress)}]</span><br><small style="color:#16a34a;font-weight:700;">🟢 Internet Service: ON (Full Internet Access Active)</small><br><small style="color:#475569;">IP: <strong>${escapeHtml(det.ipAddress)}</strong> · Approved: <strong>${new Date(n.created_at).toLocaleTimeString()}</strong></small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td><div style="display:flex;gap:6px;flex-wrap:wrap;">${actions}</div></td></tr>`;
   }).join('');
 
   const disallowedRows = disallowedItems.map((n) => {
+    const det = getClientDetails(n);
     const badgeCls = ['denied', 'disconnected', 'quarantine_auto_denied'].includes(n.status) ? 'blocked' : '';
-    const displayStatus = n.status === 'quarantine_auto_denied' ? 'Disallowed (5m Timeout)' : (n.status === 'denied' ? 'Disallowed by Owner' : n.status.replace(/_/g, ' '));
-    const actions = `<button class="action-button" style="background:#166534;color:#fff;font-weight:600;" data-notification-response="${n.id}|allow">Re-Allow Access</button>${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;" data-user-details="${escapeHtml(n.user_id)}">View History</button>` : ''}<button class="action-button secondary" data-notification-clear="${n.id}">Clear</button>`;
-    return `<tr><td>Disallowed / Blocked</td><td><strong>${escapeHtml(n.message)}</strong><span class="status-badge ${badgeCls}" style="margin-left:6px;">${escapeHtml(displayStatus)}</span><br><small style="color:#b91c1c;font-weight:700;">🔴 Internet Service: COMPLETELY OFF</small> · <small style="color:#475569;">Repeat request is strictly denied until client disconnects and reconnects</small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td>${actions}</td></tr>`;
+    const displayStatus = n.status === 'quarantine_auto_denied' ? 'Rejected (5m Timeout)' : (n.status === 'denied' ? 'Rejected / Disallowed by Owner' : n.status.replace(/_/g, ' '));
+    const actions = `
+      <button class="action-button" style="background:#16a34a;color:#fff;font-weight:700;" data-notification-response="${n.id}|reallow" title="Reallow internet access">✅ Reallow</button>
+      ${n.user_id ? `<button class="action-button" style="background:#0284c7;color:#fff;font-weight:600;" data-user-details="${escapeHtml(n.user_id)}" title="View client details and connection history">📜 View History</button>` : ''}
+      <button class="action-button danger-action" data-notification-clear="${n.id}" title="Delete this record">🗑️ Delete</button>
+    `;
+    return `<tr><td><span class="status-badge ${badgeCls}">🔴 Rejected / Blocked</span></td><td><strong>${escapeHtml(det.clientDeviceName)}</strong> <span style="font-family:monospace;color:#475569;">[${escapeHtml(det.macAddress)}]</span><span class="status-badge ${badgeCls}" style="margin-left:6px;font-size:0.75rem;">${escapeHtml(displayStatus)}</span><br><small style="color:#dc2626;font-weight:700;">🔴 Internet Service: OFF</small> · <small style="color:#475569;">Repeat request is strictly denied until client disconnects and reconnects</small><br><small style="color:#475569;">IP: <strong>${escapeHtml(det.ipAddress)}</strong> · Past usage: <strong>${escapeHtml(det.totalPastUsageMb)}</strong></small></td><td>${escapeHtml(n.location_name || '—')}</td><td>${new Date(n.created_at).toLocaleString()}</td><td><div style="display:flex;gap:6px;flex-wrap:wrap;">${actions}</div></td></tr>`;
   }).join('');
 
   const activeTab = state.notificationTab;
   let activeContent = '';
   let activeIntro = '';
 
-  if (activeTab === 'temp_quarantine') {
-    activeIntro = 'State a) 45-Second Temp Quarantine: Active connection requests in the 45-second owner popup review window. Internet service is COMPLETELY OFF. Client has zero internet access.';
-    activeContent = tempQuarantineItems.length ? table(['State', 'Notification & Timers', 'Location', 'Requested Time', 'Actions'], tempQuarantineRows) : '<p class="empty">No clients currently in 45s temp quarantine.</p>';
+  if (activeTab === 'new_request') {
+    activeIntro = '🆕 New Connection Requests: Fresh incoming client connection requests requiring your review. Internet service is strictly OFF. Click Allow to grant access, Wait to keep on hold in Pending, or Deny to disallow (moves to Rejected after 45s).';
+    activeContent = newRequestItems.length ? table(['State', 'Client Details & Status', 'Location', 'Requested Time', 'Actions'], newRequestRows) : '<p class="empty">No active new connection requests.</p>';
   } else if (activeTab === 'pending') {
-    activeIntro = 'State b) Pending Approvals: Requests that exceeded the 45-second review window or were moved to pending. Internet service remains COMPLETELY OFF. Auto-disconnects after 5 minutes total if unapproved.';
-    activeContent = pendingItems.length ? table(['State', 'Notification & Countdown', 'Location', 'Requested Time', 'Actions'], pendingRows) : '<p class="empty">No pending connection requests awaiting approval.</p>';
+    activeIntro = '⏳ Pending Requests: Connection requests placed on hold via "Wait" or unreviewed after 45s. Internet service is COMPLETELY OFF. Auto-rejects after 5 minutes total.';
+    activeContent = pendingItems.length ? table(['State', 'Client Details & Auto-Reject Countdown', 'Location', 'Requested Time', 'Actions'], pendingRows) : '<p class="empty">No pending connection requests awaiting approval.</p>';
   } else if (activeTab === 'allowed') {
-    activeIntro = 'State c) Allowed Requests: Clients approved by the Owner. THIS IS THE ONLY STATE WHERE INTERNET ACCESS IS ACTIVE.';
-    activeContent = allowedItems.length ? table(['State', 'Notification & Access Status', 'Location', 'Approved Time', 'Actions'], approvedRows) : '<p class="empty">No approved connection records.</p>';
+    activeIntro = '✅ Allowed Requests: Clients approved by Owner. THIS IS THE ONLY STATE WHERE INTERNET ACCESS IS ACTIVE.';
+    activeContent = allowedItems.length ? table(['State', 'Client & Access Status', 'Location', 'Approved Time', 'Actions'], approvedRows) : '<p class="empty">No approved connection records.</p>';
   } else {
-    activeIntro = 'State d) Disallowed Requests: Clients disallowed by Owner, auto-disallowed after 5m timeout, or disconnected. Internet service is COMPLETELY OFF. Repeat requests are strictly denied until disconnected.';
-    activeContent = disallowedItems.length ? table(['State', 'Notification & Status', 'Location', 'Time', 'Actions'], disallowedRows) : '<p class="empty">No disallowed or disconnected records.</p>';
+    activeIntro = '🚫 Rejected Requests: Clients rejected by Owner, auto-rejected after 5m timeout, or disconnected. Internet service is COMPLETELY OFF.';
+    activeContent = disallowedItems.length ? table(['State', 'Client & Status', 'Location', 'Time', 'Actions'], disallowedRows) : '<p class="empty">No rejected or disconnected records.</p>';
   }
 
   const tabsHtml = `
     <div class="notification-tabs" style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center;">
-      <button class="action-button ${activeTab === 'temp_quarantine' ? 'active-tab' : ''}" data-notif-tab="temp_quarantine" style="${activeTab === 'temp_quarantine' ? 'background:#b91c1c;color:#fff;font-weight:700;border-color:#b91c1c;' : 'background:#fff;color:#334155;'}">
-        ⏱️ 1. Temp Quarantine (${tempQuarantineItems.length})
+      <button class="action-button ${activeTab === 'new_request' ? 'active-tab' : ''}" data-notif-tab="new_request" style="${activeTab === 'new_request' ? 'background:#0284c7;color:#fff;font-weight:700;border-color:#0284c7;' : 'background:#fff;color:#334155;'}">
+        🆕 New Request (${newRequestItems.length})
       </button>
-      <button class="action-button ${activeTab === 'pending' ? 'active-tab' : ''}" data-notif-tab="pending" style="${activeTab === 'pending' ? 'background:#d97706;color:#fff;font-weight:700;border-color:#d97706;' : 'background:#fff;color:#334155;'}">
-        ⏳ 2. Pending Approvals (${pendingItems.length})
+      <button class="action-button ${activeTab === 'pending' ? 'active-tab' : ''}" data-notif-tab="pending" style="${activeTab === 'pending' ? 'background:#ea580c;color:#fff;font-weight:700;border-color:#ea580c;' : 'background:#fff;color:#334155;'}">
+        ⏳ Pending (${pendingItems.length})
       </button>
-      <button class="action-button ${activeTab === 'allowed' ? 'active-tab' : ''}" data-notif-tab="allowed" style="${activeTab === 'allowed' ? 'background:#166534;color:#fff;font-weight:700;border-color:#166534;' : 'background:#fff;color:#334155;'}">
-        ✅ 3. Allowed Requests (${allowedItems.length})
+      <button class="action-button ${activeTab === 'allowed' ? 'active-tab' : ''}" data-notif-tab="allowed" style="${activeTab === 'allowed' ? 'background:#16a34a;color:#fff;font-weight:700;border-color:#16a34a;' : 'background:#fff;color:#334155;'}">
+        ✅ Allowed (${allowedItems.length})
       </button>
-      <button class="action-button ${activeTab === 'disallowed' ? 'active-tab' : ''}" data-notif-tab="disallowed" style="${activeTab === 'disallowed' ? 'background:#475569;color:#fff;font-weight:700;border-color:#475569;' : 'background:#fff;color:#334155;'}">
-        🚫 4. Disallowed Requests (${disallowedItems.length})
+      <button class="action-button ${(activeTab === 'rejected' || activeTab === 'disallowed') ? 'active-tab' : ''}" data-notif-tab="rejected" style="${(activeTab === 'rejected' || activeTab === 'disallowed') ? 'background:#dc2626;color:#fff;font-weight:700;border-color:#dc2626;' : 'background:#fff;color:#334155;'}">
+        🚫 Rejected (${disallowedItems.length})
       </button>
       <div style="margin-left:auto;display:flex;gap:8px;flex-wrap:wrap;">
         <button class="action-button secondary" data-notification-clear-tab="${activeTab}" style="background:#475569;color:#fff;font-weight:600;" title="Clear notifications in current tab">
@@ -274,11 +389,10 @@ function renderNotifications() {
 
   notificationsLiveTimer = setInterval(() => {
     if (state.page !== 'notifications') { clearInterval(notificationsLiveTimer); notificationsLiveTimer = null; return; }
-    // Only re-render if on temp_quarantine or pending tab to update real-time countdowns
-    if (['temp_quarantine', 'pending'].includes(state.notificationTab) && (tempQuarantineItems.length > 0 || pendingItems.length > 0)) {
+    if (newRequestItems.length > 0 || pendingItems.length > 0 || deniedCountdownMap.size > 0) {
       renderAdmin();
     }
-  }, 2000);
+  }, 1000);
 
   return `${tabsHtml}<p class="page-intro">${activeIntro}</p>${activeContent}`;
 }
@@ -290,8 +404,13 @@ function renderRouters() {
   const rows = state.routers.map((r) => {
     const sn = r.serial_number || r.serialNumber || 'N/A';
     const lastSeen = r.last_seen_at ? new Date(r.last_seen_at).toLocaleString() : 'Never';
-    const clientCount = Array.isArray(r.clients) ? r.clients.length : 0;
-    const statusBadge = r.status === 'online' ? `<span class="status-badge allowed">Online (${clientCount} client${clientCount === 1 ? '' : 's'})</span>` : '<span class="status-badge blocked">Offline</span>';
+    // Only count wireless clients — exclude wired devices (admin PC, etc.)
+    const allClients = Array.isArray(r.clients) ? r.clients : [];
+    const wirelessClients = allClients.filter((cl) => cl.wireless !== false && cl.is_wireless !== false);
+    const clientCount = wirelessClients.length;
+    const statusBadge = r.status === 'online'
+      ? `<span class="status-badge allowed">🟢 Online (${clientCount} wireless client${clientCount === 1 ? '' : 's'})</span>`
+      : '<span class="status-badge blocked">⚫ Offline</span>';
     return `<tr><td><button class="text-link" data-router="${escapeHtml(r.id)}"><strong>${escapeHtml(r.name)}</strong></button></td><td><code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(sn)}</code></td><td><small>${escapeHtml(r.id)}</small></td><td>${escapeHtml(r.location_name || 'Unassigned')}</td><td>${statusBadge}</td><td><small>${lastSeen}</small></td><td><button class="action-button" data-router="${escapeHtml(r.id)}">Details</button><button class="action-button" data-edit-router="${escapeHtml(r.id)}">Edit</button><button class="action-button danger-action" data-delete-router="${escapeHtml(r.id)}">Delete</button></td></tr>`;
   }).join('');
   return `${formHtml}<section class="content-card"><h3>Registered Routers</h3>${table(['Router Name', 'Serial Number', 'Router ID', 'Location', 'Status', 'Last Seen', 'Actions'], rows)}</section>`;
@@ -305,7 +424,7 @@ function renderRouterDetail(router) {
   const linkedDevices = state.data?.devices?.filter((d) => d.router_id === current.id || d.routerId === current.id) || [];
   const linkedDeviceIds = linkedDevices.map((d) => d.id);
   const conns = state.data?.connections?.filter((c) => linkedDeviceIds.includes(c.device_id || c.deviceId)) || [];
-  const activeConns = conns.filter((c) => c.status === 'connected');
+  const activeConns = conns.filter((c) => ['connected', 'quarantine'].includes(c.status));
   const baseUsage = usage(conns);
 
   const telemetryTotalBytes = agentClients.reduce((sum, cl) => sum + Number(cl.rx_bytes || 0) + Number(cl.tx_bytes || 0), 0);
@@ -323,12 +442,18 @@ function renderRouterDetail(router) {
     const device = linkedDevices.find((d) => d.id === (latestConn.device_id || latestConn.deviceId)) || {};
     const userObj = state.data?.users?.find((u) => u.id === userId) || {};
     const isConnected = userConns.some((c) => c.status === 'connected');
-    const status = isConnected ? '<span class="status-badge connected">Connected</span>' : '<span class="status-badge">Disconnected</span>';
+    const isQuarantined = userConns.some((c) => c.status === 'quarantine');
+    const status = isConnected ? '<span class="status-badge connected">Connected</span>' : isQuarantined ? '<span class="status-badge quarantine">Quarantine</span>' : '<span class="status-badge">Disconnected</span>';
     const actions = isConnected ? `<button class="action-button danger-action" data-disconnect="${device.id}|${userId}">Disconnect</button><button class="action-button danger-action" data-block="${device.id}|${userId}">Blacklist</button><button class="action-button danger-action" data-delete-user="${userId}">Delete User</button>` : `<button class="action-button danger-action" data-delete-user="${userId}">Delete User</button>`;
     return `<tr><td><strong>${escapeHtml(userObj.name || latestConn.userName || 'Unknown')}</strong><small>${escapeHtml(userObj.email || latestConn.userEmail || '')}</small></td><td>${escapeHtml(device.name || latestConn.deviceName || 'Unknown')}</td>${periodCells(userConns)}<td><strong>${mb(usage(userConns))}</strong></td><td>${status}</td><td>${actions}</td></tr>`;
   }).join('');
 
-  const telemetryUserRows = agentClients.map((cl) => {
+  const representedMacs = new Set(uniqueUserIds.map((uid) => {
+    const u = state.data?.users?.find((x) => x.id === uid);
+    return (u?.email || '').toLowerCase();
+  }));
+  const unrepresentedClients = agentClients.filter((cl) => !representedMacs.has((cl.mac || '').toLowerCase()));
+  const telemetryUserRows = unrepresentedClients.map((cl) => {
     const rxMb = (Number(cl.rx_bytes || 0) / (1024 * 1024)).toFixed(2);
     const totalMbVal = ((Number(cl.rx_bytes || 0) + Number(cl.tx_bytes || 0)) / (1024 * 1024)).toFixed(2);
     const devName = linkedDevices[0]?.name || current.name;
@@ -663,8 +788,8 @@ async function deleteUserItem(id) { confirmAction('Delete this user account?', a
 async function deleteSuperUser(id) { confirmAction('Delete this account and its managed resources?', async () => { try { const result = await apiRequest(`/api/super-admin/users/${id}`, { method: 'DELETE', headers: authHeaders() }); alert(result.message); await loadDashboard(); } catch (error) { alert(error.message); } }); }
 async function loadSuperAdmins() { const response = await apiRequest('/api/super-admin/admins', { headers: authHeaders() }); state.superAdmins = response.admins || []; if (state.page === 'users') renderAdmin(); }
 async function loadOpenWrtRouters() { const response = await apiRequest('/api/openwrt/routers', { headers: authHeaders() }); state.routers = response.routers || []; const countEl = $('#routerCount'); if (countEl) countEl.textContent = state.routers.length; }
-async function addOrUpdateRouter(e) { e.preventDefault(); const form = e.currentTarget; const values = Object.fromEntries(new FormData(form)); const routerId = form.dataset.editingRouter; try { const response = await apiRequest(routerId ? `/api/openwrt/routers/${routerId}` : '/api/openwrt/routers', { method: routerId ? 'PATCH' : 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(values) }); if (!routerId && response.agentToken) { alert(`Router Registered Successfully!\n\nRouter ID: ${response.routerId}\nSerial Number: ${response.serialNumber}\nAgent Token: ${response.agentToken}\n\nSAVE THIS AGENT TOKEN NOW! It is shown only once.`); } else { alert(response.message || 'Router updated.'); } state.routerFormTarget = null; await loadDashboard(); await loadOpenWrtRouters(); renderAdmin(); } catch (err) { alert(err.message); } }
-async function deleteRouterItem(routerId) { confirmAction('Delete this OpenWrt router? Devices linked to this router will be unlinked.', async () => { try { const response = await apiRequest(`/api/openwrt/routers/${routerId}`, { method: 'DELETE', headers: authHeaders() }); alert(response.message); if (state.selected?.id === routerId) state.selected = null; await loadOpenWrtRouters(); renderAdmin(); } catch (err) { alert(err.message); } }); }
+async function addOrUpdateRouter(e) { e.preventDefault(); const form = e.currentTarget; const values = Object.fromEntries(new FormData(form)); const routerId = form.dataset.editingRouter; const trimmedName = (values.name || '').trim(); const trimmedSn = (values.serialNumber || '').trim(); if (!routerId) { if (trimmedSn && (state.routers || []).some((r) => (r.serial_number || r.serialNumber || '').toLowerCase().trim() === trimmedSn.toLowerCase())) { alert(`Router with Serial Number "${trimmedSn}" is already registered on the portal. You can only add it if the existing router is first deleted from the portal.`); return; } if (trimmedName && (state.routers || []).some((r) => (r.name || '').toLowerCase().trim() === trimmedName.toLowerCase())) { alert(`Router with name "${trimmedName}" is already registered on the portal. You can only add it if the existing router is first deleted from the portal.`); return; } } else { if (trimmedSn && (state.routers || []).some((r) => r.id !== routerId && (r.serial_number || r.serialNumber || '').toLowerCase().trim() === trimmedSn.toLowerCase())) { alert(`Another router with Serial Number "${trimmedSn}" already exists on the portal.`); return; } if (trimmedName && (state.routers || []).some((r) => r.id !== routerId && (r.name || '').toLowerCase().trim() === trimmedName.toLowerCase())) { alert(`Another router with name "${trimmedName}" already exists on the portal.`); return; } } try { const response = await apiRequest(routerId ? `/api/openwrt/routers/${routerId}` : '/api/openwrt/routers', { method: routerId ? 'PATCH' : 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(values) }); if (!routerId && response.agentToken) { alert(`Router Registered Successfully!\n\nRouter ID: ${response.routerId}\nSerial Number: ${response.serialNumber}\nAgent Token: ${response.agentToken}\n\nSAVE THIS AGENT TOKEN NOW! It is shown only once.`); } else { alert(response.message || 'Router updated.'); } state.routerFormTarget = null; await loadDashboard(); await loadOpenWrtRouters(); renderAdmin(); } catch (err) { alert(err.message); } }
+async function deleteRouterItem(routerId) { confirmAction('Delete this OpenWrt router from the portal? Linked devices will also be removed. You will be able to re-add the router once deleted.', async () => { try { const response = await apiRequest(`/api/openwrt/routers/${routerId}`, { method: 'DELETE', headers: authHeaders() }); alert(response.message || 'Router deleted.'); if (state.selected?.id === routerId) state.selected = null; state.routerFormTarget = null; await loadDashboard(); await loadOpenWrtRouters(); renderAdmin(); } catch (err) { alert(err.message); } }); }
 async function allowUser(e) { e.preventDefault(); const p = Object.fromEntries(new FormData(e.currentTarget)); try { await apiRequest(`/api/devices/${p.deviceId}/allow-user`, { method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ userId: p.userId }) }); alert('Access granted.'); await loadDashboard(); } catch (err) { alert(err.message); } }
 async function addLocation(e) { e.preventDefault(); const p = Object.fromEntries(new FormData(e.currentTarget)); const target = state.locationFormTarget; try { await apiRequest(target ? `/api/locations/${target.id}` : '/api/locations', { method: target ? 'PATCH' : 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(p) }); state.locationFormTarget = null; await loadDashboard(); navigate('locations'); } catch (err) { alert(err.message); } }
 async function addDevice(e) { e.preventDefault(); const p = Object.fromEntries(new FormData(e.currentTarget)); const deviceId = e.currentTarget.dataset.editingDevice; try { const res = await apiRequest(deviceId ? `/api/devices/${deviceId}` : '/api/devices', { method: deviceId ? 'PATCH' : 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(p) }); if (!deviceId && res.routerId) { alert(`Device Registered Successfully!\n\nDevice Name: ${p.name}\nRouter ID: ${res.routerId}${res.agentToken ? `\nAgent Token: ${res.agentToken}\n\nSAVE THIS AGENT TOKEN NOW! It is shown only once.` : ''}`); } else { alert(res.message || (deviceId ? 'Device updated.' : 'Device added.')); } state.editingDevice = null; await loadDashboard(); navigate('devices'); } catch (err) { alert(err.message); } }
@@ -700,7 +825,7 @@ function renderUserDashboard(data) { state.userData = data; $('#authSection').cl
 function renderUserPage() { const d = state.userData; const meta = { locations: ['My Locations', 'Locations where you have WiFi access.'], devices: ['My Devices', 'WiFi devices you are authorised to use.'], usage: ['My Usage', 'Your current and historical data consumption.'], account: ['My Account', 'Your SecMyNet account and access summary.'] }[state.userPage]; $('#userPageTitle').textContent = meta[0]; $('#userPageDescription').textContent = meta[1]; document.querySelectorAll('[data-user-page]').forEach((a) => a.classList.toggle('active', a.dataset.userPage === state.userPage)); const uniqueLocations = [...new Map(d.devices.map((device) => [device.location?.id || device.location_id, device.location])).values()].filter(Boolean); let content = ''; if (state.userPage === 'locations') content = `<div class="stats">${stat('Accessible locations', uniqueLocations.length)}${stat('Allowed devices', d.stats.totalDevices)}${stat('Connected now', d.stats.activeConnections)}</div><div class="location-grid">${uniqueLocations.map((l) => { const devices = d.devices.filter((device) => (device.location?.id || device.location_id) === l.id); return `<article class="location-card"><span class="card-kicker">${escapeHtml(l.city)}</span><h3>${escapeHtml(l.name)}</h3><div><strong>${devices.length}</strong> available WiFi devices</div><small>${devices.map((x) => escapeHtml(x.name)).join(', ')}</small></article>`; }).join('') || '<p class="empty">You do not have access to any locations yet.</p>'}</div>`; if (state.userPage === 'devices') content = table(['Device', 'Router ID', 'Location', 'WiFi', 'Access status'], d.devices.map((device) => `<tr><td>${escapeHtml(device.name)}</td><td><code style="background:#eef2f7;padding:3px 8px;border-radius:4px;font-family:monospace;font-weight:600;color:#0f172a;">${escapeHtml(device.router_id || device.routerId || 'N/A')}</code></td><td>${escapeHtml(device.location?.name || 'Unknown')}</td><td>${escapeHtml(device.wifi_name || device.wifiName)}</td><td><span class="status-badge allowed">Allowed</span></td></tr>`).join('')); if (state.userPage === 'usage') content = `<div class="stats">${stat('Data since start', mb(usage(d.connections)))}${stat('This month', mb(usage(d.connections, 'month')))}${stat('This week', mb(usage(d.connections, 'week')))}${stat('Today', mb(usage(d.connections, 'day')))}</div>${table(['Device', 'Location', 'Status', 'Data used'], d.connections.map((c) => `<tr><td>${escapeHtml(c.deviceName)}</td><td>${escapeHtml(c.locationName)}</td><td><span class="status-badge ${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></td><td>${mb(c.dataUsedMb)}</td></tr>`).join(''))}`; if (state.userPage === 'account') content = `<div class="stats">${stat('Allowed devices', d.stats.totalDevices)}${stat('Total connections', d.stats.totalConnections)}${stat('Active connections', d.stats.activeConnections)}</div><section class="content-card"><h3>${escapeHtml(d.user.name)}</h3><p>${escapeHtml(d.user.email)}</p><p>Your access is managed by your SecMyNet administrator.</p></section>`; $('#userPageContent').innerHTML = content; }
 let modalCountdownTimer = null;
 const shownPopupNotificationIds = new Set();
-const shownPopupClientKeys = new Set();
+const activeShownPopupNotificationIdByClient = new Map();
 
 async function loadNotifications(showPopup = true) {
   if (!state.token || !state.data) return;
@@ -711,8 +836,7 @@ async function loadNotifications(showPopup = true) {
     $('#notificationCount').textContent = pending.length;
     if (state.page === 'notifications') renderAdmin();
 
-    // Show popup ONLY ONCE for a client's connection request
-    // Never show another popup for the same client while pending or disallowed
+    // Show popup window at EVERY connection request (new client or returning client after reconnecting)
     const modalEl = $('#notificationModal');
     const modalOpen = modalEl && !modalEl.classList.contains('hidden');
 
@@ -721,15 +845,14 @@ async function loadNotifications(showPopup = true) {
       const freshRequest = pending.find((n) => {
         if (n.type !== 'connection_request') return false;
         const clientKey = n.user_id || n.id;
-        if (shownPopupClientKeys.has(clientKey)) return false;
+        if (activeShownPopupNotificationIdByClient.get(clientKey) === n.id) return false;
         if (shownPopupNotificationIds.has(n.id)) return false;
-        const age = now - new Date(n.created_at).getTime();
-        return age < 45000;
+        return !n.expires_at || (new Date(n.expires_at).getTime() > now);
       });
 
       if (freshRequest) {
         const clientKey = freshRequest.user_id || freshRequest.id;
-        shownPopupClientKeys.add(clientKey);
+        activeShownPopupNotificationIdByClient.set(clientKey, freshRequest.id);
         shownPopupNotificationIds.add(freshRequest.id);
         showNotificationPopup(freshRequest);
       }
@@ -740,6 +863,15 @@ async function loadNotifications(showPopup = true) {
 function showNotificationPopup(notification) {
   if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
   const modal = $('#notificationModal');
+  const dock = $('#minimizedNotificationDock');
+  const minimizeBtn = $('#notificationModalMinimizeBtn');
+  const minRestoreBtn = $('#minimizedRestoreBtn');
+  const minAllowBtn = $('#minimizedAllowBtn');
+  const minCloseBtn = $('#minimizedCloseBtn');
+  const minCountdown = $('#minimizedCountdown');
+  const minClient = $('#minimizedClient');
+  const minTitle = $('#minimizedTitle');
+
   const overconsumption = notification.type === 'overconsumption';
   const badge = $('#notificationModalBadge');
   const timerBox = $('#notificationModalTimerBox');
@@ -752,9 +884,39 @@ function showNotificationPopup(notification) {
   const titleText = $('#notificationModalTitleText') || $('.modal-card h3');
   const netStatus = $('#notificationModalInternetStatus');
 
+  const clientName = notification.user_name || notification.user_email || (notification.message ? (notification.message.match(/detected:\s*([^[.]+)/)?.[1] || 'Connected Client') : 'Connected Client');
+  if (minClient) minClient.textContent = `${clientName.trim()} · Internet OFF`;
+  if (minTitle) minTitle.textContent = overconsumption ? 'Usage Alert' : 'Connection Request';
+
+  const minimizeModal = () => {
+    modal.classList.add('hidden');
+    if (dock) dock.classList.remove('hidden');
+  };
+
+  const restoreModal = () => {
+    if (dock) dock.classList.add('hidden');
+    modal.classList.remove('hidden');
+  };
+
+  if (minimizeBtn) minimizeBtn.onclick = minimizeModal;
+  if (minRestoreBtn) minRestoreBtn.onclick = restoreModal;
+  if (dock) dock.onclick = (e) => {
+    if (e.target.closest('button')) return;
+    restoreModal();
+  };
+  if (minAllowBtn) minAllowBtn.onclick = () => {
+    if (dock) dock.classList.add('hidden');
+    closeModal();
+    respondToNotification(notification.id, 'allow');
+  };
+  if (minCloseBtn) minCloseBtn.onclick = () => {
+    if (dock) dock.classList.add('hidden');
+  };
+
   const closeModal = () => {
     if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
     modal.classList.add('hidden');
+    if (dock) dock.classList.add('hidden');
     if (state.page === 'notifications') renderAdmin();
   };
 
@@ -776,6 +938,7 @@ function showNotificationPopup(notification) {
     if (netStatus) netStatus.classList.add('hidden');
     if (timerBox) timerBox.classList.add('hidden');
     if (waitBtn) waitBtn.classList.add('hidden');
+    if (histBtn) histBtn.classList.add('hidden');
     $('#notificationModalText').textContent = notification.message;
     allowBtn.disabled = false;
     allowBtn.style.opacity = '1';
@@ -787,31 +950,106 @@ function showNotificationPopup(notification) {
     allowBtn.onclick = () => respondToNotification(notification.id, 'continue');
     denyBtn.onclick = () => respondToNotification(notification.id, 'disconnect');
   } else {
-    const isReturning = (notification.message || '').includes('Returning user');
-    if (titleText) titleText.textContent = isReturning ? '🛡️ Returning Client — 45s Temp Quarantine' : '🛡️ New Connection Request — 45s Temp Quarantine';
+    const det = notification.client_details || {
+      clientDeviceName: notification.user_name || (notification.message ? (notification.message.match(/(?:detected|user):\s*([^[.]+)/i)?.[1] || 'Connected Client') : 'Connected Client'),
+      ipAddress: (notification.message ? notification.message.match(/(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/)?.[1] : null) || '192.168.1.188',
+      macAddress: (notification.user_email && /^([0-9a-f]{2}[:-]){5}[0-9a-f]{2}$/i.test(notification.user_email) ? notification.user_email : (notification.message ? notification.message.match(/\[([0-9a-fA-F:]{17})\]/)?.[1] : '—')).toUpperCase(),
+      lastConnected: (notification.message && notification.message.includes('Returning user')) ? (notification.message.match(/Last logged:\s*([^·(]+)/)?.[1] || 'Earlier session') : 'First connection (New device)',
+      lastDisconnected: '—',
+      lastSessionDataMb: (notification.message && notification.message.includes('Total past usage')) ? (notification.message.match(/Total past usage:\s*([0-9.]+\s*MB)/i)?.[1] || '0.00 MB') : '0.00 MB',
+      totalPastUsageMb: (notification.message && notification.message.includes('Total past usage')) ? (notification.message.match(/Total past usage:\s*([0-9.]+\s*MB)/i)?.[1] || '0.00 MB') : '0.00 MB',
+      visitCount: (notification.message && notification.message.match(/Visit #(\d+)/i)) ? parseInt(notification.message.match(/Visit #(\d+)/i)[1], 10) : 1,
+      isReturning: (notification.message || '').includes('Returning user')
+    };
+
+    if (titleText) titleText.textContent = det.isReturning ? '🛡️ Returning Client Connection Request' : '🛡️ New Connection Request';
     if (badge) {
       badge.classList.remove('hidden');
       badge.className = 'status-badge quarantine';
-      badge.textContent = 'State: 45s Temp Quarantine';
+      badge.textContent = 'State: 45s Review';
     }
     if (netStatus) netStatus.classList.remove('hidden');
     if (timerBox) timerBox.classList.remove('hidden');
+
     if (waitBtn) {
       waitBtn.classList.remove('hidden');
-      waitBtn.textContent = '⏳ Move to Pending (Internet OFF)';
+      waitBtn.textContent = '⏳ Wait (Keep on Hold)';
       waitBtn.style.background = '#d97706';
       waitBtn.style.color = '#fff';
       waitBtn.style.fontWeight = '600';
-      waitBtn.title = 'Move request to Pending Approvals queue (Keep Internet OFF)';
+      waitBtn.title = 'Keep client on hold for permission and move to Pending tab (Internet strictly OFF)';
       waitBtn.onclick = () => respondToNotification(notification.id, 'wait');
     }
-    $('#notificationModalText').textContent = notification.message;
+
+    if (histBtn) {
+      if (notification.user_id) {
+        histBtn.classList.remove('hidden');
+        histBtn.textContent = '📜 View History';
+        histBtn.style.background = '#0284c7';
+        histBtn.style.color = '#fff';
+        histBtn.style.fontWeight = '600';
+        histBtn.title = 'View client telemetry, sessions, and past usage';
+        histBtn.onclick = () => {
+          modal.classList.add('hidden');
+          showUserDetailsModal(notification.user_id);
+        };
+      } else {
+        histBtn.classList.add('hidden');
+      }
+    }
+
+    $('#notificationModalText').innerHTML = `
+      <div class="client-details-card" style="background:#ffffff;border:1px solid #cbd5e1;border-radius:10px;padding:12px;margin-bottom:2px;box-shadow:0 1px 3px rgba(0,0,0,0.05);">
+        <div style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #f1f5f9;padding-bottom:8px;margin-bottom:10px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <span style="font-size:1.4rem;">📱</span>
+            <div>
+              <div style="font-size:1.05rem;font-weight:800;color:#0f172a;">${escapeHtml(det.clientDeviceName)}</div>
+              <div style="font-size:0.75rem;font-weight:700;color:${det.isReturning ? '#0284c7' : '#16a34a'};">
+                ${det.isReturning ? `🔄 Returning Client · Visit #${det.visitCount}` : '✨ New Client · First Time Connection'}
+              </div>
+            </div>
+          </div>
+          <span class="status-badge" style="background:${det.isReturning ? '#e0f2fe' : '#dcfce7'};color:${det.isReturning ? '#0369a1' : '#15803d'};font-weight:700;font-size:0.75rem;">
+            ${det.isReturning ? 'Returning Client' : 'New Client'}
+          </span>
+        </div>
+        
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+          <div style="background:#f8fafc;padding:8px 10px;border-radius:6px;border:1px solid #e2e8f0;">
+            <div style="font-size:0.72rem;color:#64748b;font-weight:700;text-transform:uppercase;">🌐 IP Address</div>
+            <div style="font-size:0.92rem;font-weight:800;color:#1e293b;margin-top:2px;font-family:monospace;">${escapeHtml(det.ipAddress)}</div>
+          </div>
+          <div style="background:#f8fafc;padding:8px 10px;border-radius:6px;border:1px solid #e2e8f0;">
+            <div style="font-size:0.72rem;color:#64748b;font-weight:700;text-transform:uppercase;">🏷️ MAC Address</div>
+            <div style="font-size:0.92rem;font-weight:800;color:#1e293b;margin-top:2px;font-family:monospace;">${escapeHtml(det.macAddress)}</div>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px;">
+          <div style="background:#f8fafc;padding:8px 10px;border-radius:6px;border:1px solid #e2e8f0;">
+            <div style="font-size:0.72rem;color:#64748b;font-weight:700;text-transform:uppercase;">🕒 Lastly Connected</div>
+            <div style="font-size:0.84rem;font-weight:700;color:#334155;margin-top:2px;">${escapeHtml(det.lastConnected)}</div>
+          </div>
+          <div style="background:#f8fafc;padding:8px 10px;border-radius:6px;border:1px solid #e2e8f0;">
+            <div style="font-size:0.72rem;color:#64748b;font-weight:700;text-transform:uppercase;">📊 Data Last Session</div>
+            <div style="font-size:0.9rem;font-weight:800;color:#0284c7;margin-top:2px;">${escapeHtml(det.lastSessionDataMb)}</div>
+          </div>
+        </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;background:#f1f5f9;padding:6px 10px;border-radius:6px;font-size:0.78rem;color:#475569;">
+          <span>Total Past Usage: <strong style="color:#0f172a;">${escapeHtml(det.totalPastUsageMb)}</strong></span>
+          <span>Location: <strong style="color:#0f172a;">${escapeHtml(notification.location_name || 'Main Location')}</strong></span>
+        </div>
+      </div>
+    `;
+
     denyBtn.disabled = false;
-    denyBtn.textContent = '🚫 Disallow (Block)';
+    denyBtn.textContent = '🚫 Deny (Block)';
     denyBtn.style.background = '#b91c1c';
     denyBtn.style.color = '#fff';
     denyBtn.style.fontWeight = '600';
-    denyBtn.title = 'Disallow client and block internet access';
+    denyBtn.title = 'Disallow client immediately from internet (Moves to Rejected in 45s)';
     denyBtn.onclick = () => respondToNotification(notification.id, 'deny');
 
     allowBtn.disabled = false;
@@ -827,12 +1065,13 @@ function showNotificationPopup(notification) {
       respondToNotification(notification.id, 'allow');
     };
 
+    const popupOpenedAt = Date.now();
     function updateTimers() {
       const now = Date.now();
       const createdTime = new Date(notification.created_at).getTime();
       const expires = notification.expires_at ? new Date(notification.expires_at).getTime() : (createdTime + 300000);
-      const elapsedSec = Math.floor((now - createdTime) / 1000);
-      const reviewRemaining = Math.max(0, 45 - elapsedSec);
+      const onScreenSec = Math.floor((now - popupOpenedAt) / 1000);
+      const reviewRemaining = Math.max(0, 45 - onScreenSec);
       const timeoutRemaining = Math.max(0, Math.ceil((expires - now) / 1000));
       const holdEl = $('#notificationHoldCountdown');
       const timeoutEl = $('#notificationTimeoutCountdown');
@@ -857,14 +1096,18 @@ function showNotificationPopup(notification) {
         denyBtn.textContent = 'Close';
         denyBtn.onclick = closeModal;
       } else if (reviewRemaining === 0) {
-        // 45s popup review window finished without response -> Move to State b: Pending Approvals tab!
+        // 45s popup review window finished without response -> Move to Pending Approvals tab!
         if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
         modal.classList.add('hidden');
+        if (dock) dock.classList.add('hidden');
         if (state.page === 'notifications') {
           state.notificationTab = 'pending';
           renderAdmin();
         }
       } else {
+        if (minCountdown) {
+          minCountdown.textContent = `${reviewRemaining}s`;
+        }
         if (holdEl) {
           holdEl.textContent = `${reviewRemaining}s left (moves to Pending at 0s)`;
           holdEl.style.color = '#0284c7';
@@ -881,6 +1124,7 @@ function showNotificationPopup(notification) {
     updateTimers();
     modalCountdownTimer = setInterval(updateTimers, 1000);
   }
+  if (dock) dock.classList.add('hidden');
   modal.classList.remove('hidden');
 }
 
@@ -911,7 +1155,7 @@ async function clearAllNotifications(tab = null) {
     await apiRequest(url, { method: 'DELETE', headers: authHeaders() });
     if (!tab) {
       shownPopupNotificationIds.clear();
-      shownPopupClientKeys.clear();
+      activeShownPopupNotificationIdByClient.clear();
     }
     await loadNotifications(false);
     if (state.page === 'notifications') renderAdmin();
@@ -922,24 +1166,46 @@ async function clearAllNotifications(tab = null) {
 
 async function respondToNotification(id, action) {
   if (modalCountdownTimer) { clearInterval(modalCountdownTimer); modalCountdownTimer = null; }
+  $('#minimizedNotificationDock')?.classList.add('hidden');
+  $('#notificationModal')?.classList.add('hidden');
+
+  if (action === 'deny') {
+    // Record 45s countdown transition so client stays in "New Request" tab disallowed for 45s before entering "Rejected" tab
+    deniedCountdownMap.set(id, Date.now() + 45000);
+    if (state.page === 'notifications') {
+      state.notificationTab = 'new_request';
+    }
+  } else if (action === 'wait') {
+    if (state.page === 'notifications') {
+      state.notificationTab = 'pending';
+    }
+  } else if (action === 'allow' || action === 'reallow') {
+    if (state.page === 'notifications') {
+      state.notificationTab = 'allowed';
+    }
+  }
+
   try {
     const res = await apiRequest(`/api/notifications/${id}/respond`, {
       method: 'POST',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ action, allow: action === 'allow' })
+      body: JSON.stringify({ action, allow: action === 'allow' || action === 'reallow' })
     });
-    $('#notificationModal').classList.add('hidden');
-    if (res && res.message) alert(res.message);
+    $('#notificationModal')?.classList.add('hidden');
+    $('#minimizedNotificationDock')?.classList.add('hidden');
+    if (res && res.message) {
+      if (action !== 'deny') alert(res.message);
+    }
     await loadDashboard();
   } catch (e) {
     alert(e.message);
   }
 }
 async function loadDashboard() { try { const profile = await apiRequest('/api/profile', { headers: authHeaders() }); if (profile.user.role === 'user') return renderUserDashboard(await apiRequest('/api/user-dashboard', { headers: authHeaders() })); state.data = await apiRequest('/api/dashboard', { headers: authHeaders() }); $('#authSection').classList.add('hidden'); $('#dashboard').classList.remove('hidden'); $('#userDashboard').classList.add('hidden'); $('#locationCount').textContent = state.data.stats.totalLocations; $('#deviceCount').textContent = state.data.stats.totalDevices; await loadNotifications(); await loadOpenWrtRouters(); const extraClients = (state.routers || []).flatMap((r) => r.clients || []).filter((cl) => { const mac = (cl.mac || '').toLowerCase(); return !state.data.users.some((u) => (u.email || '').toLowerCase() === mac || u.id === 'user-mac-' + mac.replace(/[^a-z0-9]/g, '')); }); $('#userCount').textContent = state.data.users.filter((user) => user.role !== 'super_admin').length + extraClients.length; state.page = location.hash.slice(1) || (profile.user.role === 'super_admin' ? 'users' : 'overview'); if (!pageMeta(state.page) || (state.page === 'super-admin' && profile.user.role !== 'super_admin')) state.page = profile.user.role === 'super_admin' ? 'users' : 'overview'; if (state.page === 'super-admin') state.page = 'users'; if (profile.user.role === 'super_admin') await loadSuperAdmins(); renderAdmin(); } catch (e) { logout(); alert(e.message); } }
-async function login(e, endpoint) { e.preventDefault(); try { const data = await apiRequest(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.fromEntries(new FormData(e.currentTarget))) }); state.token = data.token; localStorage.setItem('secmynet-token', state.token); await loadDashboard(); } catch (err) { alert(err.message); } }
-async function register(e) { e.preventDefault(); const form = e.currentTarget; const values = Object.fromEntries(new FormData(form)); const error = $('#passwordError'); if (values.password !== values.confirmPassword) { error.textContent = 'Passwords do not match.'; $('#confirmPassword').focus(); return; } error.textContent = ''; delete values.confirmPassword; try { const data = await apiRequest('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) }); state.token = data.token; localStorage.setItem('secmynet-token', state.token); await loadDashboard(); } catch (err) { alert(err.message); } }
+async function login(e, endpoint) { e.preventDefault(); try { const data = await apiRequest(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.fromEntries(new FormData(e.currentTarget))) }); state.token = data.token; localStorage.setItem('secmynet-token', state.token); await loadDashboard(); if (!state._notifPolling) { state._notifPolling = setInterval(() => loadNotifications(), 2500); } } catch (err) { alert(err.message); } }
+async function register(e) { e.preventDefault(); const form = e.currentTarget; const values = Object.fromEntries(new FormData(form)); const error = $('#passwordError'); if (values.password !== values.confirmPassword) { error.textContent = 'Passwords do not match.'; $('#confirmPassword').focus(); return; } error.textContent = ''; delete values.confirmPassword; try { const data = await apiRequest('/api/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) }); state.token = data.token; localStorage.setItem('secmynet-token', state.token); await loadDashboard(); if (!state._notifPolling) { state._notifPolling = setInterval(() => loadNotifications(), 2500); } } catch (err) { alert(err.message); } }
 function togglePassword(id, button) { const input = $(`#${id}`); const isVisible = input.type === 'text'; input.type = isVisible ? 'password' : 'text'; button.setAttribute('aria-label', `${isVisible ? 'Show' : 'Hide'} ${id === 'confirmPassword' ? 'confirm password' : 'password'}`); button.title = button.getAttribute('aria-label'); }
 function showLoginCard() { $('#loginCard').classList.remove('hidden'); $('#registerCard').classList.add('hidden'); }
 function showRegisterCard() { $('#loginCard').classList.add('hidden'); $('#registerCard').classList.remove('hidden'); }
-function logout() { state.token = ''; state.data = null; localStorage.removeItem('secmynet-token'); sessionStorage.removeItem('secmynet-session-start'); $('#authSection').classList.remove('hidden'); $('#dashboard').classList.add('hidden'); $('#userDashboard').classList.add('hidden'); $('#adminIdentity').classList.add('hidden'); showLoginCard(); }
-$('#registerForm').addEventListener('submit', register); $('#loginForm').addEventListener('submit', (e) => login(e, '/api/login')); $('#showRegisterLink').addEventListener('click', showRegisterCard); $('#showLoginLink').addEventListener('click', showLoginCard); document.querySelectorAll('[data-password-toggle]').forEach((button) => button.addEventListener('click', () => togglePassword(button.dataset.passwordToggle, button))); $('#confirmPassword').addEventListener('input', () => { const matches = $('#registerPassword').value === $('#confirmPassword').value; $('#passwordError').textContent = $('#confirmPassword').value && !matches ? 'Passwords do not match.' : ''; }); $('#userLogoutBtn').addEventListener('click', logout); $('#adminIdentityLogout').addEventListener('click', logout); $('#sidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-page]'); if (a) { e.preventDefault(); navigate(a.dataset.page); } }); $('#userSidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-user-page]'); if (a) { e.preventDefault(); state.userPage = a.dataset.userPage; history.replaceState(null, '', `#my-${state.userPage}`); renderUserPage(); } }); $('#backToListBtn').addEventListener('click', () => { state.selected = null; renderAdmin(); }); document.addEventListener('click', (e) => { const button = e.target.closest('[data-notification-response]'); if (button) { const [id, action] = button.dataset.notificationResponse.split('|'); respondToNotification(id, action); } const clearBtn = e.target.closest('[data-notification-clear]'); if (clearBtn) { clearNotification(clearBtn.dataset.notificationClear); } const clearTabBtn = e.target.closest('[data-notification-clear-tab]'); if (clearTabBtn) { clearAllNotifications(clearTabBtn.dataset.notificationClearTab); } const clearAllBtn = e.target.closest('[data-notification-clear-all]'); if (clearAllBtn) { clearAllNotifications(null); } const tabBtn = e.target.closest('[data-notif-tab]'); if (tabBtn) { state.notificationTab = tabBtn.dataset.notifTab; renderAdmin(); } }); if (state.token) { loadDashboard(); setInterval(() => loadNotifications(), 20000); }
+function logout() { state.token = ''; state.data = null; if (state._notifPolling) { clearInterval(state._notifPolling); state._notifPolling = null; } localStorage.removeItem('secmynet-token'); sessionStorage.removeItem('secmynet-session-start'); $('#authSection').classList.remove('hidden'); $('#dashboard').classList.add('hidden'); $('#userDashboard').classList.add('hidden'); $('#adminIdentity').classList.add('hidden'); showLoginCard(); }
+$('#registerForm').addEventListener('submit', register); $('#loginForm').addEventListener('submit', (e) => login(e, '/api/login')); $('#showRegisterLink').addEventListener('click', showRegisterCard); $('#showLoginLink').addEventListener('click', showLoginCard); document.querySelectorAll('[data-password-toggle]').forEach((button) => button.addEventListener('click', () => togglePassword(button.dataset.passwordToggle, button))); $('#confirmPassword').addEventListener('input', () => { const matches = $('#registerPassword').value === $('#confirmPassword').value; $('#passwordError').textContent = $('#confirmPassword').value && !matches ? 'Passwords do not match.' : ''; }); $('#userLogoutBtn').addEventListener('click', logout); $('#adminIdentityLogout').addEventListener('click', logout); $('#sidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-page]'); if (a) { e.preventDefault(); navigate(a.dataset.page); } }); $('#userSidebarNav').addEventListener('click', (e) => { const a = e.target.closest('[data-user-page]'); if (a) { e.preventDefault(); state.userPage = a.dataset.userPage; history.replaceState(null, '', `#my-${state.userPage}`); renderUserPage(); } }); $('#backToListBtn').addEventListener('click', () => { state.selected = null; renderAdmin(); }); document.addEventListener('click', (e) => { const button = e.target.closest('[data-notification-response]'); if (button) { const [id, action] = button.dataset.notificationResponse.split('|'); respondToNotification(id, action); } const clearBtn = e.target.closest('[data-notification-clear]'); if (clearBtn) { clearNotification(clearBtn.dataset.notificationClear); } const clearTabBtn = e.target.closest('[data-notification-clear-tab]'); if (clearTabBtn) { clearAllNotifications(clearTabBtn.dataset.notificationClearTab); } const clearAllBtn = e.target.closest('[data-notification-clear-all]'); if (clearAllBtn) { clearAllNotifications(null); } const tabBtn = e.target.closest('[data-notif-tab]'); if (tabBtn) { state.notificationTab = tabBtn.dataset.notifTab; renderAdmin(); } }); if (state.token) { loadDashboard(); if (!state._notifPolling) { state._notifPolling = setInterval(() => loadNotifications(), 2500); } }

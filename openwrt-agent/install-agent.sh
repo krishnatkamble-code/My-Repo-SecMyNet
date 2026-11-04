@@ -53,9 +53,73 @@ if command -v uci >/dev/null 2>&1 && [ -f /etc/config/uhttpd ]; then
   fi
 fi
 
-# 5. Initialize firewall rules and wipe stale allowed states
+# 5. Initialize firewall rules, protect wired Ethernet connections, and wipe stale allowed states
 rm -f /etc/secmynet-agent/allowed_macs 2>/dev/null || true
+rm -f /etc/secmynet-agent/blocked_macs 2>/dev/null || true
 touch /etc/secmynet-agent/allowed_macs
+mkdir -p /etc/secmynet-agent
+touch /etc/secmynet-agent/wired_macs
+
+# PERMANENT WHITELIST FOR DESKTOP / ADMIN PC AND WAN GATEWAY
+echo "d8:5e:d3:9b:2e:56" >> /etc/secmynet-agent/wired_macs
+echo "04:f4:1c:03:fe:aa" >> /etc/secmynet-agent/wired_macs
+
+# Remove any stale invalid tokens or gateway from quarantine lists
+sed -i '/tywe/d;/type/d;/04:f4:1c:03:fe:aa/d;/d8:5e:d3:9b:2e:56/d' /etc/secmynet-agent/quarantined_macs 2>/dev/null || true
+
+# Clean up any accumulated individual fw4 forward / dstnat drop rules from past bugs
+if command -v nft >/dev/null 2>&1; then
+  for h in $(nft -a list chain inet fw4 forward 2>/dev/null | grep -E 'drop' | sed -n 's/.*# handle \([0-9]*\)/\1/p'); do
+    nft delete rule inet fw4 forward handle "$h" 2>/dev/null || true
+  done
+  for h in $(nft -a list chain inet fw4 dstnat 2>/dev/null | grep -E '8080' | sed -n 's/.*# handle \([0-9]*\)/\1/p'); do
+    nft delete rule inet fw4 dstnat handle "$h" 2>/dev/null || true
+  done
+fi
+
+# Detect current wired connections from brctl showmacs and whitelist them.
+# Direct port-number check: LAN1=1, LAN2=2, LAN3=3, LAN4=4 are wired switch ports.
+# WiFi phy ports are 5 and above on this router — never matched.
+if command -v brctl >/dev/null 2>&1; then
+  brctl showmacs br-lan 2>/dev/null | while read -r _port_no _bmac _rest; do
+    [ -z "$_port_no" ] || [ "$_port_no" = "port" ] && continue
+    # Direct port match: 1-4 = physical LAN switch ports (LAN1, LAN2, LAN3, LAN4)
+    case "$_port_no" in
+      1|2|3|4)
+        echo "$_bmac" | tr '[:upper:]' '[:lower:]' >> /etc/secmynet-agent/wired_macs
+        continue
+        ;;
+    esac
+    # Fallback: resolve port number → interface name for non-standard layouts
+    for _pdir in /sys/class/net/br-lan/brif/*; do
+      if [ -f "$_pdir/port_no" ]; then
+        _curr_port=$(cat "$_pdir/port_no" 2>/dev/null | sed 's/^0x//')
+        _curr_port_dec=$(printf "%d" "0x$_curr_port" 2>/dev/null || echo "$_curr_port")
+        if [ "$_curr_port_dec" = "$_port_no" ] || [ "$_curr_port" = "$_port_no" ]; then
+          _if_name=$(basename "$_pdir")
+          case "$_if_name" in
+            eth*|lan*|en*|wan*)
+              echo "$_bmac" | tr '[:upper:]' '[:lower:]' >> /etc/secmynet-agent/wired_macs
+              ;;
+          esac
+        fi
+      fi
+    done
+  done
+fi
+
+if command -v bridge >/dev/null 2>&1; then
+  bridge fdb show 2>/dev/null | grep -v '00:00:00:00:00:00' | while read -r _wmac _rest; do
+    _port=$(bridge fdb show 2>/dev/null | grep -i "$_wmac" | while read -r _a _b _p _rest2; do echo "$_p"; break; done)
+    case "$_port" in
+      eth*|lan*|en*|wan*)
+        echo "$_wmac" | tr '[:upper:]' '[:lower:]' >> /etc/secmynet-agent/wired_macs
+        ;;
+    esac
+  done
+fi
+sort -u /etc/secmynet-agent/wired_macs -o /etc/secmynet-agent/wired_macs 2>/dev/null || true
+
 /bin/sh /etc/secmynet-agent/agent.sh --init
 /etc/init.d/firewall restart 2>/dev/null || true
 echo "✔ Initialized SecMyNet zero-trust firewall quarantine table and reloaded firewall"
